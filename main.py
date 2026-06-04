@@ -5,9 +5,10 @@ Usage:
 
 Workflow:
   1. Parse .SP file to extract wavelength/%T transmission target
-  2. Load .dds design, replace optimization targets with .SP data
-  3. Open modified design in MacLeod, run Simplex optimization
-  4. Print and save optimized layer thicknesses
+  2. Load nominal layer thicknesses from .dds via MacLeod COM
+  3. Push SP data as new targets via COM
+  4. Run Simplex (Nelder-Mead) using MacLeod's merit function
+  5. Print and save optimized layer thicknesses
 """
 
 import argparse
@@ -17,8 +18,11 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent / "src"))
 
 from utils.sp_parser import parse_sp
-from macleod.dds_editor import load_design, get_layers, replace_targets, save_design, print_layers
-from macleod.com_interface import connect, open_design, run_simplex, get_layer_thicknesses, save_design as com_save
+from macleod.dds_editor import load_design, get_layers as xml_get_layers, print_layers
+from macleod.com_interface import (
+    connect, open_design, get_layers, set_targets_from_sp,
+    run_simplex, save_design, print_comparison
+)
 
 
 def main():
@@ -27,7 +31,7 @@ def main():
     parser.add_argument("--target",     required=True, help="Path to .SP spectrophotometer file")
     parser.add_argument("--output",     default=None,  help="Output .dds path (default: <design>_optimized.dds)")
     parser.add_argument("--iterations", type=int, default=5000, help="Simplex max iterations (default: 5000)")
-    parser.add_argument("--no-com",     action="store_true", help="Skip MacLeod COM — only update targets in XML and exit")
+    parser.add_argument("--no-com",     action="store_true", help="Skip MacLeod COM — only parse files and exit")
     args = parser.parse_args()
 
     design_path = Path(args.design)
@@ -38,51 +42,44 @@ def main():
     print(f"\n[1] Reading target: {target_path.name}")
     sp = parse_sp(target_path)
     print(f"    Chamber: {sp.chamber}  |  Design: {sp.design_name}  |  F={sp.f_factor}  |  Run={sp.run}")
-    print(f"    Wavelength range: {min(sp.wavelengths):.0f}–{max(sp.wavelengths):.0f} nm  |  {len(sp.wavelengths)} points")
+    print(f"    Wavelength range: {min(sp.wavelengths):.0f}-{max(sp.wavelengths):.0f} nm  |  {len(sp.wavelengths)} points")
 
-    # --- Step 2: Load design and show nominal thicknesses ---
-    print(f"\n[2] Loading design: {design_path.name}")
+    # --- Step 2: Show nominal thicknesses from XML (no COM needed) ---
+    print(f"\n[2] Nominal layer stack (from XML):")
     tree = load_design(design_path)
-    nominal_layers = get_layers(tree)
-    print("\n    Nominal layer stack:")
-    print_layers(nominal_layers)
-
-    # --- Step 3: Replace targets with .SP data ---
-    print(f"\n[3] Replacing optimization targets ({len(sp.wavelengths)} points from .SP data)")
-    replace_targets(tree, sp.wavelengths, sp.transmittances)
-
-    modified_path = design_path.with_stem(design_path.stem + "_with_sp_targets")
-    save_design(tree, modified_path)
-    print(f"    Modified design saved: {modified_path.name}")
+    nominal_xml = xml_get_layers(tree)
+    print_layers(nominal_xml)
 
     if args.no_com:
-        print("\n--no-com flag set. Stopping after XML edit.")
+        print("\n--no-com flag set. Stopping after file parse.")
         return
 
-    # --- Step 4: MacLeod COM — open, optimize, extract ---
-    print("\n[4] Connecting to MacLeod...")
-    app = connect(launch=True)
+    # --- Step 3: Connect to MacLeod ---
+    print(f"\n[3] Connecting to MacLeod...")
+    session = connect()
 
-    print("\n[5] Opening modified design in MacLeod...")
-    design = open_design(app, modified_path)
+    # --- Step 4: Open design via COM ---
+    print(f"\n[4] Opening design in MacLeod...")
+    design = open_design(session, design_path)
+    nominal_com = get_layers(design)
 
-    print("\n[6] Running Simplex optimization...")
-    merit = run_simplex(app, design, max_iterations=args.iterations)
+    # --- Step 5: Push SP targets via COM ---
+    print(f"\n[5] Loading SP transmission targets into MacLeod...")
+    set_targets_from_sp(design, sp.wavelengths, sp.transmittances)
 
-    print("\n[7] Extracting optimized layer thicknesses...")
-    opt_layers = get_layer_thicknesses(design)
+    # --- Step 6: Run Simplex ---
+    print(f"\n[6] Running Simplex optimization...")
+    result = run_simplex(design, max_iterations=args.iterations)
 
-    print("\n    Optimized layer stack:")
-    print(f"{'Layer':<8} {'Material':<30} {'Nominal (nm)':<16} {'Optimized (nm)':<16} {'Delta (nm)':<12}")
-    print("-" * 84)
-    for nom, opt in zip(nominal_layers, opt_layers):
-        delta = opt["thickness_nm"] - nom.thickness_nm
-        print(f"{opt['number']:<8} {opt['material']:<30} {nom.thickness_nm:<16.4f} {opt['thickness_nm']:<16.4f} {delta:+.4f}")
+    # --- Step 7: Print comparison ---
+    print(f"\n[7] Results:")
+    print_comparison(nominal_com, result["layers"])
+    print(f"\n    Merit function: {result['merit']:.6f}")
+    print(f"    Converged: {result['converged']}  |  Evaluations: {result['iterations']}")
 
-    # --- Step 5: Save result ---
-    com_save(design, output_path)
-    print(f"\n[8] Optimized design saved: {output_path}")
-    print(f"    Final merit function: {merit:.6f}")
+    # --- Step 8: Save ---
+    save_design(design, output_path)
+    print(f"\n[8] Optimized design saved: {output_path.name}")
 
 
 if __name__ == "__main__":
