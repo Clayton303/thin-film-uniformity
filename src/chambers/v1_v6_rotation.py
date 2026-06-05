@@ -22,7 +22,7 @@ from pathlib import Path
 import numpy as np
 import yaml
 
-from gcode.tormac_generator import profile_to_toolpath, write_tap
+from gcode.tormac_generator import profile_to_toolpath, write_tap, write_npl
 
 _DEFAULT_CONFIG = Path(__file__).parent.parent.parent / "config" / "chambers.yaml"
 
@@ -203,6 +203,8 @@ def apply_correction(
 
     tx, ty = profile_to_toolpath(radii, new_widths, x_offset)
     write_tap(tx, ty, new_tap)
+    write_npl(radii, new_widths, tx, ty, new_tap.with_suffix(".npl"), x_offset,
+              title=f"Cut Line, Tool: {new_stem}")
 
     return new_msk, new_tap
 
@@ -244,4 +246,6 @@ def regenerate_tap(
     radii, widths = load_msk(msk_path)
     tx, ty = profile_to_toolpath(radii, widths, x_offset)
     write_tap(tx, ty, out_path)
+    write_npl(radii, widths, tx, ty, out_path.with_suffix(".npl"), x_offset,
+              title=f"Cut Line, Tool: {msk_path.stem}")
     return out_path

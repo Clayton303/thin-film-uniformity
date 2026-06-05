@@ -20,6 +20,41 @@ from pathlib import Path
 import numpy as np
 from scipy.interpolate import CubicSpline
 
+try:
+    import win32com.client as _com
+    _COM_AVAILABLE = True
+except ImportError:
+    _COM_AVAILABLE = False
+
+# --- MacLeod PlotCreator constants (from PlotConstants.bas) -----------------
+_LINE_NONE    = 1
+_LINE_SOLID   = 2
+_SHAPE_NONE   = 1
+_SHAPE_DOT    = 2
+_COLOR_BLACK  = 0x000000
+_COLOR_BLUE   = 0xFF0000
+_COLOR_GREEN  = 0x00FF00
+
+# V1/V6 mask blank outline (from Mask_Magic_All_Rev4.bas)
+_BLANK_X = [8.475, 8.475, 15.975, 15.975, 17.825, 17.825, 15.975, 15.975, 8.475]
+_BLANK_Y = [-1.5,   1.5,   1.5,   0.25,   0.25,  -0.25,  -0.25,  -1.5,  -1.5 ]
+
+# V1/V6 mounting holes: (cx, cy, diameter) in inches
+_HOLES = [
+    (8.715,  0.00,  0.215),
+    (16.875, 0.00,  0.215),
+    (17.375, 0.00,  0.215),
+    (16.625, 0.00,  0.125),
+    (17.625, 0.00,  0.125),
+    (16.675, 0.15,  0.125),
+    (12.000, 0.00,  0.177),
+]
+
+# Contour radii shown on the V1/V6 plot (inches, at scale 0.95)
+_CONTOUR_RADII = [2, 3, 4, 5, 6, 7]
+_CONTOUR_SCALE = 0.95
+_CONTOUR_CMAX  = 1.5
+
 # Machine constants (hardcoded in Mask_Magic_All_Rev4.bas OutputGcode)
 _ENTRY_X  = 17.5791
 _ENTRY_Y  = -0.7324
@@ -121,6 +156,98 @@ def write_tap(
     )
     content = _HEADER + xy_lines + _PASS_SEP + xy_lines + _FOOTER
     Path(output_path).write_bytes(content.encode("ascii"))
+
+
+def write_npl(
+    radii: list[float],
+    widths: list[float],
+    toolpath_x: list[float],
+    toolpath_y: list[float],
+    output_path: str | Path,
+    x_offset: float = 8.215,
+    title: str = "",
+) -> None:
+    """Write a MacLeod .npl plot file via EMacleod.PlotCreator COM.
+
+    Reproduces the Mask_Magic_All_Rev4.bas plot: mask edge dots, toolpath
+    line, blank outline, substrate-radius contours, and mounting holes.
+    Requires MacLeod to be installed (uses its COM server).
+    """
+    if not _COM_AVAILABLE:
+        raise RuntimeError("pywin32 is required for .npl generation — pip install pywin32")
+
+    # Mask edge points: lower half (outer->inner) then upper half (inner->outer)
+    mask_x, mask_y = [], []
+    for r, w in zip(reversed(radii), reversed(widths)):
+        mask_x.append(math.sqrt(r**2 - (w / 2)**2) + x_offset)
+        mask_y.append(-w / 2)
+    for r, w in zip(radii, widths):
+        mask_x.append(math.sqrt(r**2 - (w / 2)**2) + x_offset)
+        mask_y.append(w / 2)
+
+    plot = _com.Dispatch("EMacleod.PlotCreator")
+    plot.Title      = title or f"Cut Line, Tool: {Path(output_path).stem}"
+    plot.XAxisTitle = "x position (inch)"
+    plot.YAxisTitle = "y (inch)"
+
+    # Mask edge dots
+    plot.SymbolShape = _SHAPE_DOT
+    plot.LinePattern = _LINE_NONE
+    plot.SymbolSize  = 4
+    _add_trace(plot, mask_x, mask_y, "mask pos")
+
+    # Toolpath (blue solid)
+    plot.SymbolShape = _SHAPE_NONE
+    plot.LinePattern = _LINE_SOLID
+    plot.LineColor   = _COLOR_BLUE
+    _add_trace(plot, toolpath_x, toolpath_y, "tool cut path")
+
+    # Mask blank outline (green)
+    plot.LineColor = _COLOR_GREEN
+    plot.LineWidth = 3
+    _add_trace(plot, _BLANK_X, _BLANK_Y, "mask blank")
+
+    # Substrate radius contours (black arcs at r=2..7" scaled by 0.95)
+    plot.LineColor = _COLOR_BLACK
+    for i, rad in enumerate(_CONTOUR_RADII):
+        cx, cy = _contour_arc(rad, x_offset, _CONTOUR_SCALE, _CONTOUR_CMAX)
+        plot.LineWidth = i + 2
+        _add_trace(plot, cx, cy, str(rad))
+
+    # Mounting holes (green circles)
+    plot.LineColor = _COLOR_GREEN
+    plot.LineWidth = 3
+    for hx, hy, hd in _HOLES:
+        cx, cy = _circle_pts(hx, hy, hd / 2)
+        _add_trace(plot, cx, cy, "")
+
+    plot.SaveAs(str(Path(output_path).resolve()))
+
+
+# ---------------------------------------------------------------------------
+
+def _add_trace(plot, xs: list, ys: list, label: str) -> None:
+    """Call PlotCreator.AddTrace with Python lists (COM dispatch accepts them directly)."""
+    plot.AddTrace([float(v) for v in xs], [float(v) for v in ys], label)
+
+
+def _contour_arc(
+    rad: float,
+    x_offset: float = 8.215,
+    scale: float = _CONTOUR_SCALE,
+    cmax: float = _CONTOUR_CMAX,
+    n: int = 11,
+) -> tuple[list[float], list[float]]:
+    """Arc of radius rad*scale centred at (x_offset, 0), matching CreateConture."""
+    ys = [cmax * (i - 5) / 5 for i in range(n)]
+    xs = [math.sqrt((rad * scale)**2 - y**2) + x_offset for y in ys]
+    return xs, ys
+
+
+def _circle_pts(cx: float, cy: float, r: float, steps: int = 36) -> tuple[list, list]:
+    """Full circle of radius r centred at (cx, cy)."""
+    angles = [2 * math.pi * i / steps for i in range(steps + 1)]
+    return [cx + r * math.cos(a) for a in angles], [cy + r * math.sin(a) for a in angles]
 
 
 # ---------------------------------------------------------------------------
