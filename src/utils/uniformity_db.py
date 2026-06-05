@@ -34,16 +34,19 @@ class RunRecord:
     anchor_file: str    # filename of the first SP in the batch
     id: Optional[int] = None
     run_number: Optional[str] = None   # populated later via set_run_number()
+    design_file: Optional[str] = None  # path to reference .dds used for analysis
 
 
 @dataclass
 class MeasurementRecord:
     run_id: int
-    radius: float       # inches
-    sp_file: str        # filename
+    radius: float           # inches
+    sp_file: str            # filename
     peak_nm: float
     peak_pct: float
-    shift_nm: float     # Δλ vs reference radius for this run
+    shift_nm: float         # Δλ vs reference radius for this run
+    scale1: Optional[float] = None   # primary-material thickness scale
+    scale2: Optional[float] = None   # secondary-material scale (None for single-mat)
 
 
 @dataclass
@@ -51,6 +54,11 @@ class RunSummary:
     """Joined view used by the dashboard."""
     run: RunRecord
     measurements: list[MeasurementRecord] = field(default_factory=list)
+
+    @property
+    def has_scale_data(self) -> bool:
+        """True if at least one measurement has been analysed by MacLeod."""
+        return any(m.scale1 is not None for m in self.measurements)
 
     @property
     def uniformity_score(self) -> float:
@@ -95,19 +103,27 @@ def _init_schema(con: sqlite3.Connection) -> None:
             sp_file   TEXT NOT NULL,
             peak_nm   REAL,
             peak_pct  REAL,
-            shift_nm  REAL
+            shift_nm  REAL,
+            scale1    REAL,   -- primary-material thickness scale (from MacLeod optimizer)
+            scale2    REAL    -- secondary-material scale (NULL for single-material runs)
         );
 
         CREATE INDEX IF NOT EXISTS idx_meas_run ON measurements(run_id);
         CREATE INDEX IF NOT EXISTS idx_runs_chamber ON runs(chamber);
     """)
     con.commit()
-    # Migration: add run_number to existing databases that predate the column
-    try:
-        con.execute("ALTER TABLE runs ADD COLUMN run_number TEXT")
-        con.commit()
-    except sqlite3.OperationalError:
-        pass  # column already exists
+    # Migrations for databases that predate newer columns
+    for stmt in (
+        "ALTER TABLE runs ADD COLUMN run_number TEXT",
+        "ALTER TABLE runs ADD COLUMN design_file TEXT",
+        "ALTER TABLE measurements ADD COLUMN scale1 REAL",
+        "ALTER TABLE measurements ADD COLUMN scale2 REAL",
+    ):
+        try:
+            con.execute(stmt)
+            con.commit()
+        except sqlite3.OperationalError:
+            pass
 
 
 # ---------------------------------------------------------------------------
@@ -127,10 +143,11 @@ class UniformityDB:
         cur = self._con.cursor()
         try:
             cur.execute(
-                "INSERT INTO runs (chamber, design, date, f_factor, anchor_file, run_number) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
+                "INSERT INTO runs "
+                "(chamber, design, date, f_factor, anchor_file, run_number, design_file) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
                 (run.chamber, run.design, run.date, run.f_factor,
-                 run.anchor_file, run.run_number),
+                 run.anchor_file, run.run_number, run.design_file),
             )
             run_id = cur.lastrowid
         except sqlite3.IntegrityError:
@@ -196,6 +213,7 @@ class UniformityDB:
                 f_factor=rr["f_factor"],
                 anchor_file=rr["anchor_file"],
                 run_number=rr["run_number"],
+                design_file=rr["design_file"],
             )
             meas_rows = self._con.execute(
                 "SELECT * FROM measurements WHERE run_id=? ORDER BY radius",
@@ -209,6 +227,8 @@ class UniformityDB:
                     peak_nm=r["peak_nm"],
                     peak_pct=r["peak_pct"],
                     shift_nm=r["shift_nm"],
+                    scale1=r["scale1"],
+                    scale2=r["scale2"],
                 )
                 for r in meas_rows
             ]
@@ -216,6 +236,28 @@ class UniformityDB:
                 summaries.append(RunSummary(run=run, measurements=measurements))
 
         return summaries
+
+    def set_design_file(self, run_id: int, design_file: str) -> None:
+        """Record which reference .dds was used to analyse this run."""
+        self._con.execute(
+            "UPDATE runs SET design_file=? WHERE id=?", (design_file, run_id)
+        )
+        self._con.commit()
+
+    def set_scales(
+        self,
+        run_id: int,
+        radius: float,
+        scale1: float,
+        scale2: Optional[float] = None,
+    ) -> None:
+        """Store per-radius optimizer scale factors for a measurement."""
+        self._con.execute(
+            "UPDATE measurements SET scale1=?, scale2=? "
+            "WHERE run_id=? AND radius=?",
+            (scale1, scale2, run_id, radius),
+        )
+        self._con.commit()
 
     def set_run_number(
         self,
