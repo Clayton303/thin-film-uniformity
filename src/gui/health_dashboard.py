@@ -29,7 +29,7 @@ import sys
 import threading
 from pathlib import Path
 from datetime import datetime
-from typing import Optional, List
+from typing import Optional
 
 import tkinter as tk
 from tkinter import ttk, messagebox
@@ -47,8 +47,6 @@ if str(_SRC) not in sys.path:
 
 from utils.uniformity_db import UniformityDB, RunSummary
 from utils.uniformity_scanner import scan, backfill_run_numbers, SPECTRO_DIR
-from utils.uniformity_analyzer import analyze_run, resolve_design_label
-from utils.design_resolver import is_multi_material
 
 _DATE_FMT = "%m/%d/%Y"
 _COLORS   = ["#1f77b4","#ff7f0e","#2ca02c","#d62728",
@@ -110,18 +108,17 @@ def _combo_label(des: dict) -> str:
 class _UniformityPanel(ttk.Frame):
     """Reusable trend chart + run table, used in every tab."""
 
-    def __init__(self, parent: tk.Widget, *, show_run_number: bool = False):
+    def __init__(self, parent: tk.Widget):
         super().__init__(parent)
-        self._show_run_number = show_run_number
         self._build_chart()
         self._build_table()
 
     # ── Build ──────────────────────────────────────────────────────────────
 
     def _build_chart(self) -> None:
-        self._fig = Figure(figsize=(10, 3.8), dpi=96)
-        self._ax  = self._fig.add_subplot(111)
-        self._fig.tight_layout(pad=2.0)
+        self._fig = Figure(figsize=(10, 4.6), dpi=96)
+        self._ax_wl  = self._fig.add_subplot(2, 1, 1)
+        self._ax_pct = self._fig.add_subplot(2, 1, 2, sharex=self._ax_wl)
 
         frame = ttk.Frame(self)
         frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
@@ -135,30 +132,20 @@ class _UniformityPanel(ttk.Frame):
         frame = ttk.LabelFrame(self, text="Runs", padding=4)
         frame.pack(side=tk.BOTTOM, fill=tk.X, padx=4, pady=(0, 4))
 
-        if self._show_run_number:
-            cols = ("date", "run_number", "design", "ref_design", "radii", "score")
-            headings = {
-                "date":       ("Date",           100),
-                "run_number": ("Run #",           90),
-                "design":     ("Design",         180),
-                "ref_design": ("Ref design",     190),
-                "radii":      ('Radii (")',      160),
-                "score":      ("Score",           80),
-            }
-        else:
-            cols = ("date", "design", "f_factor", "radii", "score")
-            headings = {
-                "date":     ("Date",          100),
-                "design":   ("Design",        240),
-                "f_factor": ("F",              60),
-                "radii":    ('Radii (")',     200),
-                "score":    ("Score (nm p-p)", 110),
-            }
+        cols = ("date", "run_number", "design", "f_factor", "radii", "score")
+        headings = {
+            "date":       ("Date",          100),
+            "run_number": ("Run #",          90),
+            "design":     ("Design",        220),
+            "f_factor":   ("F",              60),
+            "radii":      ('Radii (")',     180),
+            "score":      ("Score (nm p-p)", 110),
+        }
 
-        self._tree = ttk.Treeview(frame, columns=cols, show="headings", height=5)
+        self._tree = ttk.Treeview(frame, columns=cols, show="headings", height=4)
         for col, (text, width) in headings.items():
             self._tree.heading(col, text=text)
-            anchor = "center" if col in ("date","run_number","f_factor","score") else "w"
+            anchor = "center" if col in ("date", "run_number", "f_factor", "score") else "w"
             self._tree.column(col, width=width, anchor=anchor)
 
         sb = ttk.Scrollbar(frame, orient=tk.VERTICAL, command=self._tree.yview)
@@ -168,30 +155,18 @@ class _UniformityPanel(ttk.Frame):
 
     # ── Update ─────────────────────────────────────────────────────────────
 
-    def update_display(
-        self,
-        summaries: list[RunSummary],
-        title: str = "",
-        y_label: str | None = None,
-    ) -> None:
-        # Auto-detect y axis: use scale deviation when any run has been analysed
-        use_scale = any(s.has_scale_data for s in summaries)
-        if y_label is None:
-            y_label = ("Thickness deviation (%)\nvs nominal design"
-                       if use_scale
-                       else "Peak shift Δλ (nm)\nvs smallest radius")
-        self._update_chart(summaries, title, y_label, use_scale)
+    def update_display(self, summaries: list[RunSummary], title: str = "") -> None:
+        self._update_chart(summaries, title)
         self._update_table(summaries)
 
-    def _update_chart(
-        self, summaries: list[RunSummary], title: str,
-        y_label: str, use_scale: bool
-    ) -> None:
-        ax = self._ax
-        ax.clear()
+    def _update_chart(self, summaries: list[RunSummary], title: str) -> None:
+        ax_wl  = self._ax_wl
+        ax_pct = self._ax_pct
+        ax_wl.clear()
+        ax_pct.clear()
 
         if not summaries:
-            ax.set_title(title or "No data for selection")
+            ax_wl.set_title(title or "No data for selection")
             self._canvas.draw()
             return
 
@@ -200,33 +175,47 @@ class _UniformityPanel(ttk.Frame):
         use_dates = len(set(d.date() for d in dates)) > 1
         x_vals    = dates if use_dates else list(range(len(summaries)))
 
+        # Reference %T per run: measurement at minimum radius
+        pct_refs = {
+            s.run.id: min(s.measurements, key=lambda m: m.radius).peak_pct
+            for s in summaries if s.measurements
+        }
+
         for i, radius in enumerate(all_radii):
-            y, x_used = [], []
+            y_wl, y_pct, x_used = [], [], []
             for xi, s in zip(x_vals, summaries):
                 m = next((m for m in s.measurements if m.radius == radius), None)
                 if m is not None:
-                    val = ((m.scale1 - 1.0) * 100 if use_scale and m.scale1 is not None
-                           else m.shift_nm)
-                    y.append(val)
+                    y_wl.append(m.shift_nm)
+                    y_pct.append(m.peak_pct - pct_refs.get(s.run.id, m.peak_pct))
                     x_used.append(xi)
-            if y:
-                ax.plot(x_used, y, "o-", color=_COLORS[i % len(_COLORS)],
-                        label=f'R={radius}"', linewidth=1.6, markersize=5)
+            color = _COLORS[i % len(_COLORS)]
+            lbl   = f'R={radius}"'
+            if y_wl:
+                ax_wl.plot(x_used, y_wl, "o-", color=color, label=lbl,
+                           linewidth=1.6, markersize=5)
+            if y_pct:
+                ax_pct.plot(x_used, y_pct, "o-", color=color, label=lbl,
+                            linewidth=1.6, markersize=5)
 
-        ax.axhline(0, color="black", linewidth=0.5, linestyle="--")
-        ax.set_title(title, fontsize=10)
-        ax.set_ylabel(y_label, fontsize=8)
+        for ax in (ax_wl, ax_pct):
+            ax.axhline(0, color="black", linewidth=0.5, linestyle="--")
+            ax.grid(True, linewidth=0.4, alpha=0.5)
+
+        ax_wl.set_title(title, fontsize=10)
+        ax_wl.set_ylabel("Δλ (nm)\nvs R_min", fontsize=8)
+        ax_pct.set_ylabel("Δ%T\nvs R_min", fontsize=8)
 
         if use_dates:
-            ax.xaxis.set_major_formatter(mdates.DateFormatter("%m/%d/%y"))
-            ax.xaxis.set_major_locator(mdates.AutoDateLocator())
+            ax_pct.xaxis.set_major_formatter(mdates.DateFormatter("%m/%d/%y"))
+            ax_pct.xaxis.set_major_locator(mdates.AutoDateLocator())
             self._fig.autofmt_xdate(rotation=25, ha="right")
         else:
-            ax.set_xlabel("Run index")
+            ax_pct.set_xlabel("Run index")
 
         if all_radii:
-            ax.legend(loc="best", fontsize=8, ncol=min(3, len(all_radii)))
-        ax.grid(True, linewidth=0.4, alpha=0.5)
+            ax_wl.legend(loc="best", fontsize=8, ncol=min(3, len(all_radii)))
+
         self._fig.tight_layout(pad=1.5)
         self._canvas.draw()
 
@@ -236,21 +225,14 @@ class _UniformityPanel(ttk.Frame):
 
         for s in reversed(summaries):
             radii_str = "  ".join(f'{m.radius}"' for m in s.measurements)
-            score_str = f"{s.uniformity_score:.2f}"
-            if self._show_run_number:
-                rn       = s.run.run_number or "—"
-                ref      = (Path(s.run.design_file).stem
-                            if s.run.design_file else "—")
-                analysed = " *" if s.has_scale_data else ""
-                self._tree.insert("", tk.END, values=(
-                    s.run.date or "?", rn, s.run.design,
-                    ref + analysed, radii_str, score_str,
-                ))
-            else:
-                f_str = f"{s.run.f_factor:.3f}" if s.run.f_factor else "—"
-                self._tree.insert("", tk.END, values=(
-                    s.run.date or "?", s.run.design, f_str, radii_str, score_str,
-                ))
+            self._tree.insert("", tk.END, values=(
+                s.run.date or "?",
+                s.run.run_number or "—",
+                s.run.design,
+                f"{s.run.f_factor:.3f}" if s.run.f_factor else "—",
+                radii_str,
+                f"{s.uniformity_score:.2f}",
+            ))
 
 
 # ---------------------------------------------------------------------------
@@ -325,19 +307,7 @@ class HealthDashboard(tk.Tk):
         self._single_cb.bind("<<ComboboxSelected>>",
                              lambda _: self._reload_single())
 
-        ttk.Label(sub, text="Ref:").pack(side=tk.LEFT)
-        self._single_ref_var = tk.StringVar(value="—")
-        ttk.Label(sub, textvariable=self._single_ref_var,
-                  foreground="#555", width=30).pack(side=tk.LEFT, padx=(2, 8))
-
-        self._single_analyze_btn = ttk.Button(
-            sub, text="Analyze visible runs",
-            command=lambda: self._analyze_async(self._single_summaries, self._single_panel),
-        )
-        self._single_analyze_btn.pack(side=tk.LEFT)
-
-        self._single_summaries: List[RunSummary] = []
-        self._single_panel = _UniformityPanel(frame, show_run_number=True)
+        self._single_panel = _UniformityPanel(frame)
         self._single_panel.pack(fill=tk.BOTH, expand=True)
 
     # ── Tab: Multi-Material ───────────────────────────────────────────────
@@ -361,19 +331,7 @@ class HealthDashboard(tk.Tk):
         self._combo_cb.bind("<<ComboboxSelected>>",
                             lambda _: self._reload_combo())
 
-        ttk.Label(sub, text="Ref:").pack(side=tk.LEFT)
-        self._combo_ref_var = tk.StringVar(value="—")
-        ttk.Label(sub, textvariable=self._combo_ref_var,
-                  foreground="#555", width=30).pack(side=tk.LEFT, padx=(2, 8))
-
-        self._combo_analyze_btn = ttk.Button(
-            sub, text="Analyze visible runs",
-            command=lambda: self._analyze_async(self._combo_summaries, self._combo_panel),
-        )
-        self._combo_analyze_btn.pack(side=tk.LEFT)
-
-        self._combo_summaries: List[RunSummary] = []
-        self._combo_panel = _UniformityPanel(frame, show_run_number=True)
+        self._combo_panel = _UniformityPanel(frame)
         self._combo_panel.pack(fill=tk.BOTH, expand=True)
 
     # ── Data refresh ──────────────────────────────────────────────────────
@@ -402,13 +360,6 @@ class HealthDashboard(tk.Tk):
             return
         all_runs = self._db.runs_for_chamber(ch)
         runs = [s for s in all_runs if _matches_single(s.run.design, mat)]
-        self._single_summaries = runs
-
-        # Show reference design label
-        ref = (resolve_design_label(ch, label, [])
-               if runs else "—")
-        self._single_ref_var.set(ref)
-
         self._single_panel.update_display(runs, title=f"{ch}  —  {label}")
 
     def _reload_combo(self) -> None:
@@ -421,60 +372,7 @@ class HealthDashboard(tk.Tk):
             return
         all_runs = self._db.runs_for_chamber(ch)
         runs = [s for s in all_runs if _matches_combo(s.run.design, des)]
-        self._combo_summaries = runs
-
-        # Show reference design label
-        kws = [d.get("keywords", []) for d in self._combos]
-        ref = (resolve_design_label(ch, label, kws) if runs else "—")
-        self._combo_ref_var.set(ref)
-
         self._combo_panel.update_display(runs, title=f"{ch}  —  {label}")
-
-    # ── Background analysis ───────────────────────────────────────────────
-
-    def _analyze_async(
-        self,
-        summaries: List[RunSummary],
-        panel: "_UniformityPanel",
-    ) -> None:
-        """Run MacLeod analysis for all visible runs in a background thread."""
-        if not summaries:
-            messagebox.showinfo("Analyze", "No runs to analyse for this selection.")
-            return
-
-        kws = [d.get("keywords", []) for d in self._combos]
-
-        def worker():
-            for i, s in enumerate(summaries):
-                self.after(0, lambda i=i, s=s: self._status_var.set(
-                    f"Analysing run {i+1}/{len(summaries)}: "
-                    f"{s.run.chamber} {s.run.date} {s.run.run_number or ''}…"
-                ))
-                try:
-                    analyze_run(
-                        s, self._db,
-                        combo_keywords=kws,
-                        progress=lambda m: self.after(
-                            0, lambda msg=m: self._status_var.set(msg)
-                        ),
-                    )
-                except Exception as exc:
-                    self.after(0, lambda e=exc: self._status_var.set(f"Error: {e}"))
-
-            # Reload DB and refresh panel
-            ch    = self._chamber_var.get()
-            fresh = self._db.runs_for_chamber(ch)
-            run_ids = {s.run.id for s in summaries}
-            updated = [s for s in fresh if s.run.id in run_ids]
-            self.after(0, lambda: panel.update_display(
-                updated,
-                title=panel._ax.get_title(),
-            ))
-            self.after(0, lambda: self._status_var.set(
-                f"Analysis done — {len(summaries)} run(s)"
-            ))
-
-        threading.Thread(target=worker, daemon=True).start()
 
     # ── Background scan ───────────────────────────────────────────────────
 
