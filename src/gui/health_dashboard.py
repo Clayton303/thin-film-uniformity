@@ -113,6 +113,9 @@ class _UniformityPanel(ttk.Frame):
     def __init__(self, parent: tk.Widget, *, show_run_number: bool = False):
         super().__init__(parent)
         self._show_run_number = show_run_number
+        self._summaries: list[RunSummary] = []
+        self._sort_col: str = "date"
+        self._sort_asc: bool = False          # newest first by default
         self._build_chart()
         self._build_table()
 
@@ -155,11 +158,21 @@ class _UniformityPanel(ttk.Frame):
                 "score":    ("Score (% p-p)", 110),
             }
 
-        self._tree = ttk.Treeview(frame, columns=cols, show="headings", height=5)
+        self._headings = headings   # keep for sort-indicator updates
+        self._tree = ttk.Treeview(
+            frame, columns=cols, show="headings", height=5,
+            selectmode="extended",
+        )
+        _sortable = {"date", "run_number", "score"}
         for col, (text, width) in headings.items():
-            self._tree.heading(col, text=text)
+            if col in _sortable:
+                self._tree.heading(col, text=text, command=lambda c=col: self._sort_by(c))
+            else:
+                self._tree.heading(col, text=text)
             anchor = "center" if col in ("date","run_number","f_factor","score") else "w"
             self._tree.column(col, width=width, anchor=anchor)
+        self._refresh_sort_indicator()
+        self._tree.bind("<<TreeviewSelect>>", lambda _: self._on_selection_changed())
 
         sb = ttk.Scrollbar(frame, orient=tk.VERTICAL, command=self._tree.yview)
         self._tree.configure(yscrollcommand=sb.set)
@@ -239,11 +252,51 @@ class _UniformityPanel(ttk.Frame):
         self._fig.tight_layout(pad=1.5)
         self._canvas.draw()
 
+    # ── Sorting ────────────────────────────────────────────────────────────
+
+    def _sort_key(self, s: RunSummary):
+        col = self._sort_col
+        if col == "date":
+            return _parse_date(s.run.date)
+        if col == "run_number":
+            rn = s.run.run_number or ""
+            # Extract numeric part for natural sort ("R15" → 15)
+            m = re.search(r"\d+", rn)
+            return (0 if rn else 1, int(m.group()) if m else 0)
+        if col == "score":
+            if s.measurements:
+                ref = min(s.measurements, key=lambda m: m.radius).peak_nm
+                return s.uniformity_score / ref * 100 if ref else 0.0
+            return 0.0
+        return 0
+
+    def _sort_by(self, col: str) -> None:
+        if self._sort_col == col:
+            self._sort_asc = not self._sort_asc
+        else:
+            self._sort_col = col
+            self._sort_asc = True
+        self._refresh_sort_indicator()
+        self._populate_table()
+
+    def _refresh_sort_indicator(self) -> None:
+        for col, (text, _) in self._headings.items():
+            if col == self._sort_col:
+                label = f"{text} {'▲' if self._sort_asc else '▼'}"
+            else:
+                label = text
+            self._tree.heading(col, text=label)
+
     def _update_table(self, summaries: list[RunSummary]) -> None:
+        self._summaries = summaries
+        self._populate_table()
+
+    def _populate_table(self) -> None:
         for row in self._tree.get_children():
             self._tree.delete(row)
 
-        for s in reversed(summaries):
+        ordered = sorted(self._summaries, key=self._sort_key, reverse=not self._sort_asc)
+        for s in ordered:
             radii_str = "  ".join(f'{m.radius}"' for m in s.measurements)
             if s.has_scale_data:
                 score_str = f"{s.uniformity_score:.3f}"
@@ -257,15 +310,27 @@ class _UniformityPanel(ttk.Frame):
                 ref      = (Path(s.run.design_file).stem
                             if s.run.design_file else "—")
                 analysed = " *" if s.has_scale_data else ""
-                self._tree.insert("", tk.END, values=(
+                self._tree.insert("", tk.END, iid=str(s.run.id), values=(
                     s.run.date or "?", rn, s.run.design,
                     ref + analysed, radii_str, score_str,
                 ))
             else:
                 f_str = f"{s.run.f_factor:.3f}" if s.run.f_factor else "—"
-                self._tree.insert("", tk.END, values=(
+                self._tree.insert("", tk.END, iid=str(s.run.id), values=(
                     s.run.date or "?", s.run.design, f_str, radii_str, score_str,
                 ))
+
+    def _on_selection_changed(self) -> None:
+        selected_ids = {int(iid) for iid in self._tree.selection()}
+        if selected_ids:
+            visible = [s for s in self._summaries if s.run.id in selected_ids]
+        else:
+            visible = self._summaries
+        title = self._ax.get_title()
+        use_scale = any(s.has_scale_data for s in visible)
+        y_label = ("Thickness deviation (%)\nvs nominal design"
+                   if use_scale else "Peak shift Δλ (%)\nvs smallest radius")
+        self._update_chart(visible, title, y_label, use_scale)
 
 
 # ---------------------------------------------------------------------------
