@@ -30,6 +30,7 @@ from typing import Callable, Optional
 from utils.sp_parser import SPFile, parse_sp
 from utils.uniformity_metrics import find_peak, peak_shift_profile
 from utils.uniformity_db import UniformityDB, RunRecord, MeasurementRecord
+from utils.run_log_reader import RunLogReader
 
 
 SPECTRO_DIR   = Path(r"\\59o-spectro\uvwinlab\DATA")
@@ -69,14 +70,22 @@ def scan(
     db: UniformityDB,
     spectro_dir: Path = SPECTRO_DIR,
     progress: Optional[Callable[[str], None]] = None,
+    run_log: Optional[RunLogReader] = None,
 ) -> int:
     """Scan spectro_dir for new uniformity runs; add them to db.
+
+    If run_log is provided (or if the default Chamber run log R3.xlsx is
+    accessible), run numbers are looked up automatically and stored.
 
     Returns the number of new runs added.
     """
     def _log(msg: str) -> None:
         if progress:
             progress(msg)
+
+    # Use caller-supplied reader or try the default path
+    if run_log is None:
+        run_log = RunLogReader()
 
     known = db.known_anchor_files()
 
@@ -102,15 +111,58 @@ def scan(
         if not batch:
             continue
 
-        # Compute metrics
+        # Compute metrics; look up run number from log
         run, measurements = _build_records(sp, anchor_name, batch)
+        if run_log.is_available() and run.chamber and run.date:
+            rn = run_log.find_run_number(run.chamber, run.date, run.design or "")
+            if rn:
+                run.run_number = rn
+
         run_id = db.save_run(run, measurements)
         if run_id > 0:
             added += 1
-            _log(f"  Saved run {run_id}: {run.chamber} | {run.design} | {run.date} "
-                 f"| {len(measurements)} radii")
+            rn_str = f" [{run.run_number}]" if run.run_number else ""
+            _log(f"  Saved run {run_id}: {run.chamber} | {run.design} | "
+                 f"{run.date}{rn_str} | {len(measurements)} radii")
 
     return added
+
+
+def backfill_run_numbers(
+    db: UniformityDB,
+    run_log: Optional[RunLogReader] = None,
+    progress: Optional[Callable[[str], None]] = None,
+) -> int:
+    """Try to assign run numbers to existing DB runs that have none.
+
+    Call this after updating the Chamber run log, or any time you want to
+    refresh run-number assignments for previously scanned runs.
+    Returns the number of runs updated.
+    """
+    def _log(msg: str) -> None:
+        if progress:
+            progress(msg)
+
+    if run_log is None:
+        run_log = RunLogReader()
+    if not run_log.is_available():
+        _log("Run log not found — skipping backfill")
+        return 0
+
+    updated = 0
+    for chamber in db.chambers():
+        for summary in db.runs_for_chamber(chamber, min_radii=1):
+            run = summary.run
+            if run.run_number:
+                continue  # already assigned
+            rn = run_log.find_run_number(
+                run.chamber, run.date or "", run.design or ""
+            )
+            if rn and run.id is not None:
+                db.set_run_number(run.id, rn)
+                _log(f"  Backfilled {run.chamber} {run.date} -> {rn}")
+                updated += 1
+    return updated
 
 
 def _parse_cheap(path: Path) -> Optional[SPFile]:

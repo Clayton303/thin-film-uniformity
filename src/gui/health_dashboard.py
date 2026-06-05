@@ -44,7 +44,7 @@ if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
 from utils.uniformity_db import UniformityDB, RunSummary
-from utils.uniformity_scanner import scan, SPECTRO_DIR
+from utils.uniformity_scanner import scan, backfill_run_numbers, SPECTRO_DIR
 
 _DATE_FMT  = "%m/%d/%Y"
 _ALL       = "All designs"
@@ -373,6 +373,13 @@ class HealthDashboard(tk.Tk):
                 n = scan(
                     self._db,
                     spectro_dir=self._spectro_dir,
+                    progress=lambda m: self.after(0, lambda msg=m:
+                                                  self._status_var.set(msg)),
+                )
+                # Backfill any run numbers not yet assigned (covers existing
+                # runs whose log entry was added after the original scan)
+                backfill_run_numbers(
+                    self._db,
                     progress=lambda m: self.after(0, lambda msg=m:
                                                   self._status_var.set(msg)),
                 )
