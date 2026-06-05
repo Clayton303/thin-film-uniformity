@@ -5,19 +5,18 @@ Window layout
 ─────────────
   [Chamber dropdown]                       [Scan new data]  [status]
 
-  ╔══════════════════╗╔══════════════════╗╔══════════════════════════╗
-  ║ Design Uniformity║║ Single Material  ║║ Multi-Material           ║
-  ╠══════════════════╩╩══════════════════╩╩══════════════════════════╣
-  ║  [Design dropdown]  OR  [Material dropdown]  OR  [Design combo]  ║
-  ║                                                                   ║
-  ║  Trend chart  (Δλ per radius vs run date)                         ║
-  ║                                                                   ║
-  ║  Run table                                                        ║
-  ╚═══════════════════════════════════════════════════════════════════╝
+  ╔══════════════════╗╔══════════════════════════╗
+  ║ Single Material  ║║ Multi-Material           ║
+  ╠══════════════════╩╩══════════════════════════╣
+  ║  [Material dropdown]  OR  [Design combo]     ║
+  ║                                              ║
+  ║  Trend chart  (Δλ per radius vs run date)    ║
+  ║                                              ║
+  ║  Run table                                   ║
+  ╚══════════════════════════════════════════════╝
 
 Tabs
 ────
-  Design Uniformity  — any design in the DB; Design dropdown (free-form)
   Single Material    — 6 canonical single-material health checks
   Multi-Material     — combination layer-stack health checks
                        (HW 16L Ta/SiO₂, 8L Ta/SiO₂, 16L Hf/SiO₂, …)
@@ -52,7 +51,6 @@ from utils.uniformity_analyzer import analyze_run, resolve_design_label
 from utils.design_resolver import is_multi_material
 
 _DATE_FMT = "%m/%d/%Y"
-_ALL      = "All designs"
 _COLORS   = ["#1f77b4","#ff7f0e","#2ca02c","#d62728",
              "#9467bd","#8c564b","#e377c2","#7f7f7f"]
 
@@ -299,34 +297,12 @@ class HealthDashboard(tk.Tk):
         ttk.Label(toolbar, textvariable=self._status_var,
                   foreground="gray").pack(side=tk.RIGHT, padx=8)
 
-        # Notebook (three tabs)
+        # Notebook (two tabs)
         self._nb = ttk.Notebook(self)
         self._nb.pack(fill=tk.BOTH, expand=True, padx=6, pady=4)
 
-        self._build_design_tab()
         self._build_single_tab()
         self._build_combo_tab()
-
-    # ── Tab: Design Uniformity ────────────────────────────────────────────
-
-    def _build_design_tab(self) -> None:
-        frame = ttk.Frame(self._nb)
-        self._nb.add(frame, text="  Design Uniformity  ")
-
-        sub = ttk.Frame(frame, padding=(6, 4))
-        sub.pack(fill=tk.X)
-        ttk.Label(sub, text="Design:").pack(side=tk.LEFT)
-        self._design_var = tk.StringVar(value=_ALL)
-        self._design_cb  = ttk.Combobox(
-            sub, textvariable=self._design_var,
-            state="readonly", width=36,
-        )
-        self._design_cb.pack(side=tk.LEFT, padx=(2, 0))
-        self._design_cb.bind("<<ComboboxSelected>>",
-                             lambda _: self._reload_design())
-
-        self._design_panel = _UniformityPanel(frame, show_run_number=False)
-        self._design_panel.pack(fill=tk.BOTH, expand=True)
 
     # ── Tab: Single Material ──────────────────────────────────────────────
 
@@ -402,32 +378,19 @@ class HealthDashboard(tk.Tk):
 
     # ── Data refresh ──────────────────────────────────────────────────────
 
+    _KNOWN_CHAMBERS = ["V1", "V2", "V3", "V4", "V5", "V6", "V7"]
+
     def _refresh_chambers(self) -> None:
-        chambers = self._db.chambers()
+        in_db = set(self._db.chambers())
+        chambers = self._KNOWN_CHAMBERS + sorted(in_db - set(self._KNOWN_CHAMBERS))
         self._chamber_cb["values"] = chambers
         if chambers:
             self._chamber_var.set(chambers[0])
             self._on_chamber_changed()
 
     def _on_chamber_changed(self, _event=None) -> None:
-        ch = self._chamber_var.get()
-        designs = [_ALL] + self._db.designs_for_chamber(ch)
-        self._design_cb["values"] = designs
-        self._design_var.set(_ALL)
-        self._reload_design()
         self._reload_single()
         self._reload_combo()
-
-    def _reload_design(self) -> None:
-        ch     = self._chamber_var.get()
-        design = self._design_var.get()
-        if not ch:
-            return
-        runs = self._db.runs_for_chamber(
-            ch, design=None if design == _ALL else design,
-        )
-        title = f"{ch}  —  {design}" if design != _ALL else ch
-        self._design_panel.update_display(runs, title=title)
 
     def _reload_single(self) -> None:
         ch    = self._chamber_var.get()
