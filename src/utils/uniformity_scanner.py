@@ -94,9 +94,14 @@ def scan(
     pnum_to_path = {_pnum(p): p for p in all_sp if _pnum(p) is not None}
 
     added = 0
+    consumed_pnums: set[int] = set()   # followers already absorbed into a prior batch
+
     for sp_path in all_sp:
+        pnum = _pnum(sp_path)
         anchor_name = sp_path.name
-        if anchor_name in known:
+
+        # Skip files already in DB or already consumed as a follower this scan
+        if anchor_name in known or (pnum is not None and pnum in consumed_pnums):
             continue
 
         # Parse cheaply: only check header line
@@ -107,7 +112,8 @@ def scan(
         _log(f"Found anchor: {anchor_name}")
 
         # Collect the full batch starting from this anchor
-        batch = _collect_batch(sp, sp_path, pnum_to_path)
+        batch, batch_consumed = _collect_batch(sp, sp_path, pnum_to_path)
+        consumed_pnums.update(batch_consumed)
         if not batch:
             continue
 
@@ -174,20 +180,35 @@ def _parse_cheap(path: Path) -> Optional[SPFile]:
         return None
 
 
+def _same_batch(anchor: SPFile, candidate: SPFile) -> bool:
+    """True if candidate is from the same uniformity run as anchor."""
+    return (candidate.chamber    == anchor.chamber
+            and candidate.design_name == anchor.design_name
+            and candidate.date        == anchor.date
+            and candidate.f_factor    == anchor.f_factor)
+
+
 def _collect_batch(
     anchor_sp: SPFile,
     anchor_path: Path,
     pnum_to_path: dict[int, Path],
-) -> list[SPFile]:
-    """Return the full list of SPFile objects for this run (anchor first)."""
-    base_pnum  = _pnum(anchor_path)
-    anchor_mtime = _mtime(anchor_path)
-    cutoff = anchor_mtime + timedelta(minutes=MAX_BATCH_MINUTES)
+) -> tuple[list[SPFile], set[int]]:
+    """Return (batch SPFiles, consumed P-numbers for follower files).
 
-    batch = [anchor_sp]
+    Accepts two kinds of followers:
+    - Short-R files  (header is just 'R=n' — original format)
+    - Full-header files with same chamber/design/date/F (all-header format)
+    """
+    base_pnum    = _pnum(anchor_path)
+    anchor_mtime = _mtime(anchor_path)
+    cutoff       = anchor_mtime + timedelta(minutes=MAX_BATCH_MINUTES)
+
+    batch:    list[SPFile] = [anchor_sp]
+    consumed: set[int]     = set()
 
     for offset in range(1, MAX_BATCH_LOOKAHEAD + 1):
-        candidate_path = pnum_to_path.get(base_pnum + offset)
+        pnum = base_pnum + offset
+        candidate_path = pnum_to_path.get(pnum)
         if candidate_path is None:
             break
         if _mtime(candidate_path) > cutoff:
@@ -197,15 +218,19 @@ def _collect_batch(
         if sp is None:
             break
 
-        # Accept only short-R files (batch followers)
         if _is_short_r(sp):
             batch.append(sp)
+            consumed.add(pnum)
+        elif _is_anchor(sp) and _same_batch(anchor_sp, sp):
+            # Full-header follower from the same run
+            batch.append(sp)
+            consumed.add(pnum)
         elif _is_anchor(sp):
-            # A new anchor starts a new run — stop here
+            # Different run starts — stop collecting
             break
-        # else: unrelated file (no R header at all) — skip but keep looking
+        # else: unrelated file with no R header — skip, keep looking
 
-    return batch
+    return batch, consumed
 
 
 def _build_records(

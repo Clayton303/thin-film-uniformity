@@ -167,8 +167,12 @@ class UniformityDB:
     # --- Read ------------------------------------------------------------
 
     def known_anchor_files(self) -> set[str]:
-        rows = self._con.execute("SELECT anchor_file FROM runs").fetchall()
-        return {r["anchor_file"] for r in rows}
+        """Return all SP filenames already in the DB (anchors + measurement files)."""
+        anchors = {r["anchor_file"]
+                   for r in self._con.execute("SELECT anchor_file FROM runs").fetchall()}
+        followers = {r["sp_file"]
+                     for r in self._con.execute("SELECT sp_file FROM measurements").fetchall()}
+        return anchors | followers
 
     def chambers(self) -> list[str]:
         rows = self._con.execute(
