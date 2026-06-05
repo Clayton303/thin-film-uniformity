@@ -158,10 +158,14 @@ class UniformityDB:
         return [r["design"] for r in rows]
 
     def runs_for_chamber(
-        self, chamber: str, design: Optional[str] = None
+        self, chamber: str, design: Optional[str] = None, min_radii: int = 2
     ) -> list[RunSummary]:
-        """Return all runs for a chamber, optionally filtered by design.
-        Results sorted oldest-first."""
+        """Return runs for a chamber, optionally filtered by design.
+
+        min_radii: skip runs with fewer than this many witness measurements
+        (single-measurement batches can't show a uniformity profile).
+        Results sorted oldest-first.
+        """
         if design:
             run_rows = self._con.execute(
                 "SELECT * FROM runs WHERE chamber=? AND design=? ORDER BY date, id",
@@ -198,7 +202,8 @@ class UniformityDB:
                 )
                 for r in meas_rows
             ]
-            summaries.append(RunSummary(run=run, measurements=measurements))
+            if len(measurements) >= min_radii:
+                summaries.append(RunSummary(run=run, measurements=measurements))
 
         return summaries
 
