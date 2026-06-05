@@ -1,9 +1,8 @@
-# Standard single-material uniformity health-check designs.
-# These are run quickly between production runs to track per-chamber
-# deposition uniformity for each core material.
+# ── Single-material uniformity health-check designs ──────────────────────────
+# Quick runs to check per-chamber uniformity for each core material.
 #
-# name:       material formula used in SP header design field
-# target_nm:  nominal physical layer thickness for this check
+# name:       material formula as written in SP header design field
+# target_nm:  nominal layer thickness for this check
 # aliases:    alternate names the operator might write in the SP title
 # color:      hex color used in the dashboard trend chart
 
@@ -37,3 +36,32 @@ materials:
     target_nm: 200
     aliases: [TiO2]
     color: "#8c564b"
+
+
+# ── Multi-material combination uniformity health-check designs ────────────────
+# Standard layer stacks run to check uniformity of combined material systems.
+#
+# label:    display name shown in the dropdown
+# keywords: ALL of these tokens must appear (case-insensitive) in the SP
+#           header design field for the run to match.  Use short root tokens
+#           (hw, 16l, 8l, hf, al2o3) so they match regardless of exact phrasing,
+#           e.g. "Uniformity HW 16L", "HW 16L Ta-SiO2-V1", "16L Hf-SiO2" all
+#           match using these rules.
+# color:    hex color for the trend chart
+
+designs:
+  - label: "HW 16L  (Ta₂O₅/SiO₂)"
+    keywords: [hw, 16l]
+    color: "#1f77b4"
+
+  - label: "HW 8L  (Ta₂O₅/SiO₂)"
+    keywords: [hw, 8l]
+    color: "#ff7f0e"
+
+  - label: "16L  (HfO₂/SiO₂)"
+    keywords: [16l, hf]
+    color: "#d62728"
+
+  - label: "16L  (Al₂O₃/SiO₂)"
+    keywords: [16l, al2o3]
+    color: "#9467bd"

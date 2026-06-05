@@ -5,19 +5,22 @@ Window layout
 ─────────────
   [Chamber dropdown]                       [Scan new data]  [status]
 
-  ╔══════════════════════╗  ╔══════════════════════════════╗
-  ║  Design Uniformity   ║  ║  Material Health             ║
-  ╠══════════════════════╩══╩══════════════════════════════╣
-  ║  [Design dropdown]          [Material dropdown]        ║
-  ║                                                        ║
-  ║  Trend chart (Δλ per radius vs run date)               ║
-  ║                                                        ║
-  ║  Run table                                             ║
-  ╚════════════════════════════════════════════════════════╝
+  ╔══════════════════╗╔══════════════════╗╔══════════════════════════╗
+  ║ Design Uniformity║║ Single Material  ║║ Multi-Material           ║
+  ╠══════════════════╩╩══════════════════╩╩══════════════════════════╣
+  ║  [Design dropdown]  OR  [Material dropdown]  OR  [Design combo]  ║
+  ║                                                                   ║
+  ║  Trend chart  (Δλ per radius vs run date)                         ║
+  ║                                                                   ║
+  ║  Run table                                                        ║
+  ╚═══════════════════════════════════════════════════════════════════╝
 
-Design tab:    Design dropdown → trend of all runs for that design/chamber.
-Material tab:  Material dropdown limited to the 6 canonical single-material
-               health-check designs.  Run table includes Date + Run # columns.
+Tabs
+────
+  Design Uniformity  — any design in the DB; Design dropdown (free-form)
+  Single Material    — 6 canonical single-material health checks
+  Multi-Material     — combination layer-stack health checks
+                       (HW 16L Ta/SiO₂, 8L Ta/SiO₂, 16L Hf/SiO₂, …)
 """
 
 from __future__ import annotations
@@ -46,40 +49,58 @@ if str(_SRC) not in sys.path:
 from utils.uniformity_db import UniformityDB, RunSummary
 from utils.uniformity_scanner import scan, backfill_run_numbers, SPECTRO_DIR
 
-_DATE_FMT  = "%m/%d/%Y"
-_ALL       = "All designs"
-_COLORS    = ["#1f77b4","#ff7f0e","#2ca02c","#d62728",
-              "#9467bd","#8c564b","#e377c2","#7f7f7f"]
+_DATE_FMT = "%m/%d/%Y"
+_ALL      = "All designs"
+_COLORS   = ["#1f77b4","#ff7f0e","#2ca02c","#d62728",
+             "#9467bd","#8c564b","#e377c2","#7f7f7f"]
 
-_CFG_DIR   = Path(__file__).parent.parent.parent / "config"
+_CFG_DIR  = Path(__file__).parent.parent.parent / "config"
 
 
 # ---------------------------------------------------------------------------
-# Material targets
+# Config loading
 # ---------------------------------------------------------------------------
 
-def _load_material_targets() -> list[dict]:
+def _load_config() -> dict:
     path = _CFG_DIR / "material_targets.yaml"
     if not path.exists():
-        return []
+        return {"materials": [], "designs": []}
     with open(path) as f:
         data = yaml.safe_load(f)
-    return data.get("materials", [])
+    return {
+        "materials": data.get("materials", []),
+        "designs":   data.get("designs",   []),
+    }
 
 
-def _match_material(design: str, mat: dict) -> bool:
-    """True if design name refers to this material at this target thickness."""
+# ---------------------------------------------------------------------------
+# Target matching
+# ---------------------------------------------------------------------------
+
+def _matches_single(design: str, target: dict) -> bool:
+    """True if design name refers to this single-material target."""
     if not design:
         return False
-    d = design.lower()
-    d = re.sub(r"\b(layer|film|single|unif)\b", "", d)
-    names = [mat["name"].lower()] + [a.lower() for a in mat.get("aliases", [])]
-    target = str(mat["target_nm"])
-    return any(n in d for n in names) and target in d and "nm" in d
+    d = re.sub(r"[^a-z0-9 ]", " ", design.lower())
+    names = [target["name"].lower()] + [a.lower() for a in target.get("aliases", [])]
+    t = str(target["target_nm"])
+    return any(n in d for n in names) and t in d and "nm" in d
 
 
-def _material_label(mat: dict) -> str:
+def _matches_combo(design: str, target: dict) -> bool:
+    """True if design name matches all keywords for this combination target."""
+    if not design:
+        return False
+    tokens = set(re.findall(r"[a-z0-9]+", design.lower()))
+    return all(kw.lower() in tokens for kw in target.get("keywords", []))
+
+
+def _single_label(mat: dict) -> str:
     return f"{mat['name']}  {mat['target_nm']} nm"
+
+
+def _combo_label(des: dict) -> str:
+    return des["label"]
 
 
 # ---------------------------------------------------------------------------
@@ -87,7 +108,7 @@ def _material_label(mat: dict) -> str:
 # ---------------------------------------------------------------------------
 
 class _UniformityPanel(ttk.Frame):
-    """Reusable trend chart + run table; used in both notebook tabs."""
+    """Reusable trend chart + run table, used in every tab."""
 
     def __init__(self, parent: tk.Widget, *, show_run_number: bool = False):
         super().__init__(parent)
@@ -118,18 +139,18 @@ class _UniformityPanel(ttk.Frame):
             cols = ("date", "run_number", "design", "radii", "score")
             headings = {
                 "date":       ("Date",          100),
-                "run_number": ("Run #",          80),
+                "run_number": ("Run #",          90),
                 "design":     ("Design",        200),
-                "radii":      ("Radii (\")",    200),
+                "radii":      ('Radii (")',     200),
                 "score":      ("Score (nm p-p)", 110),
             }
         else:
             cols = ("date", "design", "f_factor", "radii", "score")
             headings = {
                 "date":     ("Date",          100),
-                "design":   ("Design",        220),
+                "design":   ("Design",        240),
                 "f_factor": ("F",              60),
-                "radii":    ("Radii (\")",    200),
+                "radii":    ('Radii (")',     200),
                 "score":    ("Score (nm p-p)", 110),
             }
 
@@ -167,9 +188,9 @@ class _UniformityPanel(ttk.Frame):
             return
 
         all_radii = sorted({m.radius for s in summaries for m in s.measurements})
-        dates = [_parse_date(s.run.date) for s in summaries]
+        dates     = [_parse_date(s.run.date) for s in summaries]
         use_dates = len(set(d.date() for d in dates)) > 1
-        x_vals = dates if use_dates else list(range(len(summaries)))
+        x_vals    = dates if use_dates else list(range(len(summaries)))
 
         for i, radius in enumerate(all_radii):
             y, x_used = [], []
@@ -227,7 +248,9 @@ class HealthDashboard(tk.Tk):
         super().__init__()
         self._db          = db
         self._spectro_dir = spectro_dir
-        self._materials   = _load_material_targets()
+        cfg = _load_config()
+        self._singles  = cfg["materials"]
+        self._combos   = cfg["designs"]
 
         self.title("Chamber Health Dashboard  —  FiveNine Optics")
         self.geometry("1120x780")
@@ -260,14 +283,15 @@ class HealthDashboard(tk.Tk):
         ttk.Label(toolbar, textvariable=self._status_var,
                   foreground="gray").pack(side=tk.RIGHT, padx=8)
 
-        # Notebook
+        # Notebook (three tabs)
         self._nb = ttk.Notebook(self)
         self._nb.pack(fill=tk.BOTH, expand=True, padx=6, pady=4)
 
         self._build_design_tab()
-        self._build_material_tab()
+        self._build_single_tab()
+        self._build_combo_tab()
 
-    # ── Design tab ────────────────────────────────────────────────────────
+    # ── Tab: Design Uniformity ────────────────────────────────────────────
 
     def _build_design_tab(self) -> None:
         frame = ttk.Frame(self._nb)
@@ -279,36 +303,62 @@ class HealthDashboard(tk.Tk):
         self._design_var = tk.StringVar(value=_ALL)
         self._design_cb  = ttk.Combobox(
             sub, textvariable=self._design_var,
-            state="readonly", width=32,
+            state="readonly", width=36,
         )
         self._design_cb.pack(side=tk.LEFT, padx=(2, 0))
-        self._design_cb.bind("<<ComboboxSelected>>", lambda _: self._reload_design())
+        self._design_cb.bind("<<ComboboxSelected>>",
+                             lambda _: self._reload_design())
 
         self._design_panel = _UniformityPanel(frame, show_run_number=False)
         self._design_panel.pack(fill=tk.BOTH, expand=True)
 
-    # ── Material Health tab ───────────────────────────────────────────────
+    # ── Tab: Single Material ──────────────────────────────────────────────
 
-    def _build_material_tab(self) -> None:
+    def _build_single_tab(self) -> None:
         frame = ttk.Frame(self._nb)
-        self._nb.add(frame, text="  Material Health  ")
+        self._nb.add(frame, text="  Single Material  ")
 
         sub = ttk.Frame(frame, padding=(6, 4))
         sub.pack(fill=tk.X)
         ttk.Label(sub, text="Material:").pack(side=tk.LEFT)
-        self._material_var = tk.StringVar()
-        mat_options = [_material_label(m) for m in self._materials]
-        self._material_cb  = ttk.Combobox(
-            sub, textvariable=self._material_var,
-            values=mat_options, state="readonly", width=22,
+        self._single_var = tk.StringVar()
+        opts = [_single_label(m) for m in self._singles]
+        self._single_cb  = ttk.Combobox(
+            sub, textvariable=self._single_var,
+            values=opts, state="readonly", width=22,
         )
-        self._material_cb.pack(side=tk.LEFT, padx=(2, 0))
-        if mat_options:
-            self._material_cb.current(0)
-        self._material_cb.bind("<<ComboboxSelected>>", lambda _: self._reload_material())
+        self._single_cb.pack(side=tk.LEFT, padx=(2, 0))
+        if opts:
+            self._single_cb.current(0)
+        self._single_cb.bind("<<ComboboxSelected>>",
+                             lambda _: self._reload_single())
 
-        self._material_panel = _UniformityPanel(frame, show_run_number=True)
-        self._material_panel.pack(fill=tk.BOTH, expand=True)
+        self._single_panel = _UniformityPanel(frame, show_run_number=True)
+        self._single_panel.pack(fill=tk.BOTH, expand=True)
+
+    # ── Tab: Multi-Material ───────────────────────────────────────────────
+
+    def _build_combo_tab(self) -> None:
+        frame = ttk.Frame(self._nb)
+        self._nb.add(frame, text="  Multi-Material  ")
+
+        sub = ttk.Frame(frame, padding=(6, 4))
+        sub.pack(fill=tk.X)
+        ttk.Label(sub, text="Design:").pack(side=tk.LEFT)
+        self._combo_var = tk.StringVar()
+        opts = [_combo_label(d) for d in self._combos]
+        self._combo_cb  = ttk.Combobox(
+            sub, textvariable=self._combo_var,
+            values=opts, state="readonly", width=32,
+        )
+        self._combo_cb.pack(side=tk.LEFT, padx=(2, 0))
+        if opts:
+            self._combo_cb.current(0)
+        self._combo_cb.bind("<<ComboboxSelected>>",
+                            lambda _: self._reload_combo())
+
+        self._combo_panel = _UniformityPanel(frame, show_run_number=True)
+        self._combo_panel.pack(fill=tk.BOTH, expand=True)
 
     # ── Data refresh ──────────────────────────────────────────────────────
 
@@ -325,7 +375,8 @@ class HealthDashboard(tk.Tk):
         self._design_cb["values"] = designs
         self._design_var.set(_ALL)
         self._reload_design()
-        self._reload_material()
+        self._reload_single()
+        self._reload_combo()
 
     def _reload_design(self) -> None:
         ch     = self._chamber_var.get()
@@ -338,28 +389,34 @@ class HealthDashboard(tk.Tk):
         title = f"{ch}  —  {design}" if design != _ALL else ch
         self._design_panel.update_display(runs, title=title)
 
-    def _reload_material(self) -> None:
+    def _reload_single(self) -> None:
         ch    = self._chamber_var.get()
-        label = self._material_var.get()
+        label = self._single_var.get()
         if not ch or not label:
             return
-
-        # Find the matching material target
-        mat = next(
-            (m for m in self._materials if _material_label(m) == label), None
-        )
+        mat = next((m for m in self._singles if _single_label(m) == label), None)
         if mat is None:
             return
-
-        # Filter runs whose design matches this material
         all_runs = self._db.runs_for_chamber(ch)
-        runs = [s for s in all_runs if _match_material(s.run.design, mat)]
-
-        title = f"{ch}  —  {label}"
-        self._material_panel.update_display(
+        runs = [s for s in all_runs if _matches_single(s.run.design, mat)]
+        self._single_panel.update_display(
             runs,
-            title=title,
-            y_label=f"Peak shift Δλ (nm)\nvs smallest radius",
+            title=f"{ch}  —  {label}",
+        )
+
+    def _reload_combo(self) -> None:
+        ch    = self._chamber_var.get()
+        label = self._combo_var.get()
+        if not ch or not label:
+            return
+        des = next((d for d in self._combos if _combo_label(d) == label), None)
+        if des is None:
+            return
+        all_runs = self._db.runs_for_chamber(ch)
+        runs = [s for s in all_runs if _matches_combo(s.run.design, des)]
+        self._combo_panel.update_display(
+            runs,
+            title=f"{ch}  —  {label}",
         )
 
     # ── Background scan ───────────────────────────────────────────────────
@@ -373,15 +430,15 @@ class HealthDashboard(tk.Tk):
                 n = scan(
                     self._db,
                     spectro_dir=self._spectro_dir,
-                    progress=lambda m: self.after(0, lambda msg=m:
-                                                  self._status_var.set(msg)),
+                    progress=lambda m: self.after(
+                        0, lambda msg=m: self._status_var.set(msg)
+                    ),
                 )
-                # Backfill any run numbers not yet assigned (covers existing
-                # runs whose log entry was added after the original scan)
                 backfill_run_numbers(
                     self._db,
-                    progress=lambda m: self.after(0, lambda msg=m:
-                                                  self._status_var.set(msg)),
+                    progress=lambda m: self.after(
+                        0, lambda msg=m: self._status_var.set(msg)
+                    ),
                 )
                 self.after(0, lambda: self._scan_done(n))
             except Exception as exc:
