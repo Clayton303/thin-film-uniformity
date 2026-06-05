@@ -50,18 +50,18 @@ materials:
 # color:    hex color for the trend chart
 
 designs:
-  - label: "HW 16L  (Ta₂O₅/SiO₂)"
+  - label: "HW 16L  (Ta2O5/SiO2)"
     keywords: [hw, 16l]
     color: "#1f77b4"
 
-  - label: "HW 8L  (Ta₂O₅/SiO₂)"
+  - label: "HW 8L  (Ta2O5/SiO2)"
     keywords: [hw, 8l]
     color: "#ff7f0e"
 
-  - label: "16L  (HfO₂/SiO₂)"
+  - label: "16L  (HfO2/SiO2)"
     keywords: [16l, hf]
     color: "#d62728"
 
-  - label: "16L  (Al₂O₃/SiO₂)"
+  - label: "16L  (Al2O3/SiO2)"
     keywords: [16l, al2o3]
     color: "#9467bd"

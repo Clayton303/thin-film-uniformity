@@ -10,3 +10,4 @@ build/
 *.log
 *_optimized.dds
 *_with_sp_targets.dds
+data/uniformity.db
