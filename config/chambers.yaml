@@ -13,6 +13,6 @@ chambers:
     x_offset: 8.215
     materials:
       SiO2:
-        mask_dir: "C:/Users/User/FiveNine Dropbox/FiveNine Optics Team Folder/Coating Run Data/Run Data/Masks/V6"
+        mask_dir: "C:/Users/User/FiveNine Dropbox/FiveNine Optics Team Folder/Coating Run Data/Run Data/Masks/V6/SiO2_Single"
       Ta2O5:
-        mask_dir: "C:/Users/User/FiveNine Dropbox/FiveNine Optics Team Folder/Coating Run Data/Run Data/Masks/V6"
+        mask_dir: "C:/Users/User/FiveNine Dropbox/FiveNine Optics Team Folder/Coating Run Data/Run Data/Masks/V6/Ta2O5_Single"

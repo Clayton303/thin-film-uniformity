@@ -117,10 +117,12 @@ Spline resolution: 10 steps per segment between original mask data points (~90 X
 - Format: PerkinElmer UV WinLab ASCII
 - File location: `\\59o-spectro\uvwinlab\DATA\`
 - Header line 9 encodes run metadata:
-  - Format: `[chamber]-Unif [design] [date], F=[factor], R=[run]`
+  - Format: `[chamber]-Unif [design] [date], F=[factor], R=[radius_inches]`
   - Example: `V6-Unif HW 16L 06/03/2026, F=1.044, R=2`
   - `F` = uniformity correction factor applied during deposition
-  - `R` = run number
+  - `R` = witness piece radial position in inches (NOT a run number)
+  - Batch measurements: only the first SP file in a set gets the full header;
+    subsequent files may only carry `R=[radius]` as the title field
 - Data section starts after `#DATA` marker
 - Format: tab-separated `wavelength\t%T` pairs
 - Range: 700 nm → 400 nm, 1 nm steps, 301 points
@@ -135,7 +137,7 @@ Spline resolution: 10 steps per segment between original mask data points (~90 X
 | Coating designs | `...\Coating Designs\Eric\Uniformity\` |
 | Spectro data | `\\59o-spectro\uvwinlab\DATA\` |
 | V1 masks | `...\Coating Run Data\Run Data\Masks\V1\` (subdirs: `SiO2_Single\`, `Ta2O5_Single\`) |
-| V6 masks | `...\Coating Run Data\Run Data\Masks\V6\` (no subdirs — all materials in root) |
+| V6 masks | `...\Coating Run Data\Run Data\Masks\V6\` (subdirs: `SiO2_Single\`, `Ta2O5_Single\`) |
 | MacLeod scripts | `...\Eric\Thin Film Center\References\Scripts\` |
 | Project root | `C:\Users\User\thin-film-uniformity\` |
 
