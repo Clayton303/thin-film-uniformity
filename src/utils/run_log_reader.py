@@ -109,17 +109,21 @@ class RunLogReader:
         wb.close()
         self._loaded = True
 
-    def find_run_number(
+    def find_run_entry(
         self,
         chamber: str,
         date_str: str,
         design_name: str,
-        window_days: int = 1,
-    ) -> Optional[str]:
-        """Return the best-matching run number or None.
+        window_days: int = 7,
+    ) -> Optional[tuple[str, str]]:
+        """Return (run_number, run_log_date_str) for the best match, or None.
 
-        Searches ±window_days around date_str for rows whose recipe best
-        overlaps with design_name.
+        Searches ±window_days around date_str (the SP measurement date) to
+        account for the delay between coating and spectrophotometer measurement.
+        Candidates are ranked by word-overlap between design_name and Recipe.
+
+        Returns the run log date (coating date) not the SP measurement date,
+        so the dashboard tracks when the coating was actually done.
         """
         self._ensure_loaded()
         rows = self._index.get(chamber, [])
@@ -133,7 +137,7 @@ class RunLogReader:
 
         window = timedelta(days=window_days)
         candidates = [
-            (run_number, recipe)
+            (run_number, recipe, date)
             for (date, run_number, recipe) in rows
             if abs(date - target) <= window
         ]
@@ -146,7 +150,19 @@ class RunLogReader:
             key=lambda t: _overlap(design_name, t[1]),
             reverse=True,
         )
-        return ranked[0][0]
+        run_number, _, log_date = ranked[0]
+        return run_number, log_date.strftime(_DATE_FMT)
+
+    def find_run_number(
+        self,
+        chamber: str,
+        date_str: str,
+        design_name: str,
+        window_days: int = 7,
+    ) -> Optional[str]:
+        """Convenience wrapper — returns just the run number (or None)."""
+        entry = self.find_run_entry(chamber, date_str, design_name, window_days)
+        return entry[0] if entry else None
 
     def is_available(self) -> bool:
         """True if the run log file can be read."""

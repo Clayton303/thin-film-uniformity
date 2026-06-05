@@ -111,12 +111,12 @@ def scan(
         if not batch:
             continue
 
-        # Compute metrics; look up run number from log
+        # Compute metrics; look up run number + coating date from log
         run, measurements = _build_records(sp, anchor_name, batch)
         if run_log.is_available() and run.chamber and run.date:
-            rn = run_log.find_run_number(run.chamber, run.date, run.design or "")
-            if rn:
-                run.run_number = rn
+            entry = run_log.find_run_entry(run.chamber, run.date, run.design or "")
+            if entry:
+                run.run_number, run.date = entry   # use run log date as canonical
 
         run_id = db.save_run(run, measurements)
         if run_id > 0:
@@ -155,12 +155,13 @@ def backfill_run_numbers(
             run = summary.run
             if run.run_number:
                 continue  # already assigned
-            rn = run_log.find_run_number(
+            entry = run_log.find_run_entry(
                 run.chamber, run.date or "", run.design or ""
             )
-            if rn and run.id is not None:
-                db.set_run_number(run.id, rn)
-                _log(f"  Backfilled {run.chamber} {run.date} -> {rn}")
+            if entry and run.id is not None:
+                rn, log_date = entry
+                db.set_run_number(run.id, rn, run_log_date=log_date)
+                _log(f"  Backfilled {run.chamber} {run.date} -> {rn} ({log_date})")
                 updated += 1
     return updated
 

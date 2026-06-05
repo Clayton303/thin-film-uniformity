@@ -217,11 +217,27 @@ class UniformityDB:
 
         return summaries
 
-    def set_run_number(self, run_id: int, run_number: str) -> None:
-        """Assign a run number to an existing run (called when tracking is available)."""
-        self._con.execute(
-            "UPDATE runs SET run_number=? WHERE id=?", (run_number, run_id)
-        )
+    def set_run_number(
+        self,
+        run_id: int,
+        run_number: str,
+        run_log_date: Optional[str] = None,
+    ) -> None:
+        """Assign a run number (and optionally the authoritative coating date).
+
+        run_log_date: if provided, overrides the SP-file measurement date with
+        the run log coating date so the dashboard tracks when the coating was
+        actually done, not when it was measured.
+        """
+        if run_log_date:
+            self._con.execute(
+                "UPDATE runs SET run_number=?, date=? WHERE id=?",
+                (run_number, run_log_date, run_id),
+            )
+        else:
+            self._con.execute(
+                "UPDATE runs SET run_number=? WHERE id=?", (run_number, run_id)
+            )
         self._con.commit()
 
     def run_count(self) -> int:
