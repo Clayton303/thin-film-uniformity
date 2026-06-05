@@ -1,8 +1,14 @@
 """
 Parse PerkinElmer UV WinLab ASCII .SP files.
 
-Header line 9 encodes: "[chamber]-Unif [design] [date], F=[factor], R=[run]"
-Data section after #DATA: tab-separated wavelength(nm) and %T pairs, descending wavelength.
+Header line 9 (index 8) encodes the run metadata.  Two formats are seen:
+
+  Full (anchor file):   "[chamber]-Unif [design] [date], F=[factor], R=[radius]"
+  Short (batch files):  "R=[radius]"
+
+In both cases R= is the witness piece radial position in inches.
+The short format appears in batches where the operator only labeled the
+first file with the full description.
 """
 
 import re
@@ -14,13 +20,18 @@ from typing import Optional
 @dataclass
 class SPFile:
     path: Path
-    chamber: Optional[str]
-    design_name: Optional[str]
-    date: Optional[str]
-    f_factor: Optional[float]
-    run: Optional[int]
-    wavelengths: list = field(default_factory=list)   # nm
+    chamber: Optional[str]       # e.g. "V6"
+    design_name: Optional[str]   # e.g. "HW 16L" or "Hf layer 350nm"
+    date: Optional[str]          # MM/DD/YYYY from anchor header
+    f_factor: Optional[float]    # overall correction factor (anchor file only)
+    radius: Optional[float]      # witness position in inches (R= value)
+    wavelengths: list = field(default_factory=list)   # nm, descending
     transmittances: list = field(default_factory=list) # %T
+
+    # Legacy alias so existing code using .run still works
+    @property
+    def run(self) -> Optional[float]:
+        return self.radius
 
 
 def parse_sp(path: str | Path) -> SPFile:
@@ -28,7 +39,7 @@ def parse_sp(path: str | Path) -> SPFile:
     lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
 
     result = SPFile(path=path, chamber=None, design_name=None,
-                    date=None, f_factor=None, run=None)
+                    date=None, f_factor=None, radius=None)
 
     # Line 9 (index 8) holds run metadata
     if len(lines) > 8:
@@ -53,11 +64,17 @@ def parse_sp(path: str | Path) -> SPFile:
 
 
 def _parse_header_line(line: str, result: SPFile) -> None:
-    # "V6-Unif HW 16L 06/03/2026, F=1.044, R=2"
-    m = re.match(r"^([^-]+)-Unif\s+(.+?)\s+(\d{2}/\d{2}/\d{4}),\s*F=([\d.]+),\s*R=(\d+)", line)
+    # Full anchor: "V6-Unif HW 16L 06/03/2026, F=1.044, R=2"
+    m = re.match(r"^([^-]+)-Unif\s+(.+?)\s+(\d{2}/\d{2}/\d{4}),\s*F=([\d.]+),\s*R=([\d.]+)", line)
     if m:
-        result.chamber = m.group(1).strip()
+        result.chamber     = m.group(1).strip()
         result.design_name = m.group(2).strip()
-        result.date = m.group(3).strip()
-        result.f_factor = float(m.group(4))
-        result.run = int(m.group(5))
+        result.date        = m.group(3).strip()
+        result.f_factor    = float(m.group(4))
+        result.radius      = float(m.group(5))
+        return
+
+    # Short batch-file header: "R=3"
+    m = re.match(r"^R=([\d.]+)\s*$", line)
+    if m:
+        result.radius = float(m.group(1))

@@ -1,0 +1,198 @@
+"""
+Scan the spectrophotometer data directory for uniformity runs and populate
+the UniformityDB cache.
+
+A uniformity run is identified by an "anchor" SP file whose header line
+matches the full pattern:
+    [chamber]-Unif [design] [date], F=[factor], R=[radius]
+
+Subsequent files in the same batch carry only "R=[radius]" as their title.
+The scanner groups them by looking forward from each anchor through the next
+MAX_BATCH_LOOKAHEAD P-numbers, collecting files measured within
+MAX_BATCH_MINUTES of the anchor.
+
+Design-type detection
+---------------------
+"Single layer" designs are identified heuristically: if the design name
+contains a material formula followed by a thickness (e.g. "Hf layer 350nm",
+"SiO2 500nm", "Ta2O5 layer 200nm").  Everything else is treated as
+multi-layer.  The type is stored in the design field as-is; the dashboard
+uses it only for display labels.
+"""
+
+from __future__ import annotations
+
+import re
+from datetime import datetime, timedelta
+from pathlib import Path
+from typing import Callable, Optional
+
+from utils.sp_parser import SPFile, parse_sp
+from utils.uniformity_metrics import find_peak, peak_shift_profile
+from utils.uniformity_db import UniformityDB, RunRecord, MeasurementRecord
+
+
+SPECTRO_DIR   = Path(r"\\59o-spectro\uvwinlab\DATA")
+MAX_BATCH_LOOKAHEAD = 20    # scan this many P-numbers ahead of anchor
+MAX_BATCH_MINUTES   = 120   # group files within this time window
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _pnum(path: Path) -> Optional[int]:
+    """Extract the numeric suffix from a filename like P1014116.SP."""
+    m = re.search(r"P(\d+)", path.stem, re.IGNORECASE)
+    return int(m.group(1)) if m else None
+
+
+def _mtime(path: Path) -> datetime:
+    return datetime.fromtimestamp(path.stat().st_mtime)
+
+
+def _is_anchor(sp: SPFile) -> bool:
+    return (sp.chamber is not None and sp.design_name is not None
+            and sp.date is not None and sp.f_factor is not None)
+
+
+def _is_short_r(sp: SPFile) -> bool:
+    """File has only R= in header (no full metadata)."""
+    return sp.radius is not None and sp.chamber is None
+
+
+# ---------------------------------------------------------------------------
+# Core scanner
+# ---------------------------------------------------------------------------
+
+def scan(
+    db: UniformityDB,
+    spectro_dir: Path = SPECTRO_DIR,
+    progress: Optional[Callable[[str], None]] = None,
+) -> int:
+    """Scan spectro_dir for new uniformity runs; add them to db.
+
+    Returns the number of new runs added.
+    """
+    def _log(msg: str) -> None:
+        if progress:
+            progress(msg)
+
+    known = db.known_anchor_files()
+
+    # Build sorted list of all SP files
+    all_sp = sorted(spectro_dir.glob("*.SP"), key=lambda p: _pnum(p) or 0)
+    pnum_to_path = {_pnum(p): p for p in all_sp if _pnum(p) is not None}
+
+    added = 0
+    for sp_path in all_sp:
+        anchor_name = sp_path.name
+        if anchor_name in known:
+            continue
+
+        # Parse cheaply: only check header line
+        sp = _parse_cheap(sp_path)
+        if sp is None or not _is_anchor(sp):
+            continue
+
+        _log(f"Found anchor: {anchor_name}")
+
+        # Collect the full batch starting from this anchor
+        batch = _collect_batch(sp, sp_path, pnum_to_path)
+        if not batch:
+            continue
+
+        # Compute metrics
+        run, measurements = _build_records(sp, anchor_name, batch)
+        run_id = db.save_run(run, measurements)
+        if run_id > 0:
+            added += 1
+            _log(f"  Saved run {run_id}: {run.chamber} | {run.design} | {run.date} "
+                 f"| {len(measurements)} radii")
+
+    return added
+
+
+def _parse_cheap(path: Path) -> Optional[SPFile]:
+    """Parse only header; skip full data read for the initial anchor check."""
+    try:
+        return parse_sp(path)
+    except Exception:
+        return None
+
+
+def _collect_batch(
+    anchor_sp: SPFile,
+    anchor_path: Path,
+    pnum_to_path: dict[int, Path],
+) -> list[SPFile]:
+    """Return the full list of SPFile objects for this run (anchor first)."""
+    base_pnum  = _pnum(anchor_path)
+    anchor_mtime = _mtime(anchor_path)
+    cutoff = anchor_mtime + timedelta(minutes=MAX_BATCH_MINUTES)
+
+    batch = [anchor_sp]
+
+    for offset in range(1, MAX_BATCH_LOOKAHEAD + 1):
+        candidate_path = pnum_to_path.get(base_pnum + offset)
+        if candidate_path is None:
+            break
+        if _mtime(candidate_path) > cutoff:
+            break
+
+        sp = _parse_cheap(candidate_path)
+        if sp is None:
+            break
+
+        # Accept only short-R files (batch followers)
+        if _is_short_r(sp):
+            batch.append(sp)
+        elif _is_anchor(sp):
+            # A new anchor starts a new run — stop here
+            break
+        # else: unrelated file (no R header at all) — skip but keep looking
+
+    return batch
+
+
+def _build_records(
+    anchor: SPFile,
+    anchor_filename: str,
+    batch: list[SPFile],
+) -> tuple[RunRecord, list[MeasurementRecord]]:
+    """Convert a parsed batch into DB records."""
+    run = RunRecord(
+        chamber=anchor.chamber,
+        design=anchor.design_name,
+        date=anchor.date,
+        f_factor=anchor.f_factor,
+        anchor_file=anchor_filename,
+    )
+
+    radii, peaks_nm, peaks_pct = [], [], []
+    sp_files = []
+
+    for sp in batch:
+        if sp.radius is None or not sp.wavelengths:
+            continue
+        peak_nm, peak_pct = find_peak(sp.wavelengths, sp.transmittances)
+        radii.append(sp.radius)
+        peaks_nm.append(peak_nm)
+        peaks_pct.append(peak_pct)
+        sp_files.append(sp.path.name)
+
+    shifts = peak_shift_profile(radii, peaks_nm)
+
+    measurements = [
+        MeasurementRecord(
+            run_id=0,       # filled in by DB on insert
+            radius=r,
+            sp_file=f,
+            peak_nm=p,
+            peak_pct=pt,
+            shift_nm=shifts.get(r, 0.0),
+        )
+        for r, f, p, pt in zip(radii, sp_files, peaks_nm, peaks_pct)
+    ]
+
+    return run, measurements

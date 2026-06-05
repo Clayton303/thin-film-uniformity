@@ -12,6 +12,7 @@ and compute per-chamber uniformity corrections for ion beam coating chambers at 
 - [x] MacLeod COM interface module (`src/macleod/com_interface.py`)
 - [x] .SP target file parser (`src/utils/sp_parser.py`)
 - [x] V1/V6 single-rotation mask correction + G-code output (`src/chambers/v1_v6_rotation.py`, `src/gcode/tormac_generator.py`)
+- [x] Chamber health dashboard (`src/gui/health_dashboard.py`, `src/utils/uniformity_scanner.py`, `src/utils/uniformity_db.py`, `src/utils/uniformity_metrics.py`)
 - [ ] V2/V7 planetary tilt correction
 - [ ] MacLeod feedback loop (write corrected thicknesses back)
 - [ ] Dropbox/network file resolver
@@ -186,6 +187,30 @@ thin-film-uniformity/
 - File storage: locally synced Dropbox folder (not API)
 - MacLeod version: most recent (as of June 2026)
 - Build order: V1, V2, V6, V7 → then V3, V4, V5
+
+---
+
+## Chamber Health Dashboard
+
+Tracks uniformity over time by scanning the spectrophotometer data directory for uniformity runs.
+
+**Launch:**  `python src/gui/health_dashboard.py`
+
+**How it works:**
+- Scans `\\59o-spectro\uvwinlab\DATA` for SP files whose header line 9 matches `[chamber]-Unif`
+- Groups consecutive P-numbered files into runs (anchor + R=n followers within 2 hours)
+- Computes peak wavelength at each radius via quadratic interpolation around the spectral max
+- Stores results in `data/uniformity.db` (SQLite) — only new files are processed on each scan
+- GUI: chamber dropdown → trend chart of Δλ(R) vs run date, plus run table
+
+**Uniformity metric:**  Δλ(R) = peak_wavelength(R) − peak_wavelength(R_min)
+- Works for single-layer (Hf, SiO2, Ta2O5) and multi-layer (HW 16L) designs
+- Uniformity score = peak-to-peak Δλ range across all measured radii (nm)
+- Lower score = more uniform deposition
+
+**SP header formats handled:**
+- Anchor: `V2-Unif Hf layer 350nm 06/02/2026, F=1.044, R=0`
+- Batch followers: `R=1`, `R=2`, … (short form, operator-labeled)
 
 ---
 
