@@ -1,0 +1,39 @@
+# Standard single-material uniformity health-check designs.
+# These are run quickly between production runs to track per-chamber
+# deposition uniformity for each core material.
+#
+# name:       material formula used in SP header design field
+# target_nm:  nominal physical layer thickness for this check
+# aliases:    alternate names the operator might write in the SP title
+# color:      hex color used in the dashboard trend chart
+
+materials:
+  - name: Ta2O5
+    target_nm: 300
+    aliases: []
+    color: "#1f77b4"
+
+  - name: SiO2
+    target_nm: 300
+    aliases: []
+    color: "#ff7f0e"
+
+  - name: Nb2O5
+    target_nm: 300
+    aliases: []
+    color: "#2ca02c"
+
+  - name: HfO2
+    target_nm: 250
+    aliases: [Hf]
+    color: "#d62728"
+
+  - name: Al2O3
+    target_nm: 300
+    aliases: [Al2O3]
+    color: "#9467bd"
+
+  - name: TiO2
+    target_nm: 200
+    aliases: [TiO2]
+    color: "#8c564b"

@@ -33,6 +33,7 @@ class RunRecord:
     f_factor: Optional[float]
     anchor_file: str    # filename of the first SP in the batch
     id: Optional[int] = None
+    run_number: Optional[str] = None   # populated later via set_run_number()
 
 
 @dataclass
@@ -83,7 +84,8 @@ def _init_schema(con: sqlite3.Connection) -> None:
             design      TEXT NOT NULL,
             date        TEXT,
             f_factor    REAL,
-            anchor_file TEXT UNIQUE NOT NULL
+            anchor_file TEXT UNIQUE NOT NULL,
+            run_number  TEXT
         );
 
         CREATE TABLE IF NOT EXISTS measurements (
@@ -100,6 +102,12 @@ def _init_schema(con: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_runs_chamber ON runs(chamber);
     """)
     con.commit()
+    # Migration: add run_number to existing databases that predate the column
+    try:
+        con.execute("ALTER TABLE runs ADD COLUMN run_number TEXT")
+        con.commit()
+    except sqlite3.OperationalError:
+        pass  # column already exists
 
 
 # ---------------------------------------------------------------------------
@@ -119,9 +127,10 @@ class UniformityDB:
         cur = self._con.cursor()
         try:
             cur.execute(
-                "INSERT INTO runs (chamber, design, date, f_factor, anchor_file) "
-                "VALUES (?, ?, ?, ?, ?)",
-                (run.chamber, run.design, run.date, run.f_factor, run.anchor_file),
+                "INSERT INTO runs (chamber, design, date, f_factor, anchor_file, run_number) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (run.chamber, run.design, run.date, run.f_factor,
+                 run.anchor_file, run.run_number),
             )
             run_id = cur.lastrowid
         except sqlite3.IntegrityError:
@@ -186,6 +195,7 @@ class UniformityDB:
                 date=rr["date"],
                 f_factor=rr["f_factor"],
                 anchor_file=rr["anchor_file"],
+                run_number=rr["run_number"],
             )
             meas_rows = self._con.execute(
                 "SELECT * FROM measurements WHERE run_id=? ORDER BY radius",
@@ -206,6 +216,13 @@ class UniformityDB:
                 summaries.append(RunSummary(run=run, measurements=measurements))
 
         return summaries
+
+    def set_run_number(self, run_id: int, run_number: str) -> None:
+        """Assign a run number to an existing run (called when tracking is available)."""
+        self._con.execute(
+            "UPDATE runs SET run_number=? WHERE id=?", (run_number, run_id)
+        )
+        self._con.commit()
 
     def run_count(self) -> int:
         return self._con.execute("SELECT COUNT(*) FROM runs").fetchone()[0]
