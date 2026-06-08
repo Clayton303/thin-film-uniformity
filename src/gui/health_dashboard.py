@@ -34,6 +34,8 @@ from typing import Optional, List
 import tkinter as tk
 from tkinter import ttk, messagebox
 
+import numpy as np
+from scipy.interpolate import CubicSpline
 import matplotlib
 matplotlib.use("TkAgg")
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
@@ -46,7 +48,7 @@ if str(_SRC) not in sys.path:
 
 from utils.uniformity_db import UniformityDB, RunSummary
 from utils.uniformity_scanner import SPECTRO_DIR, _build_records
-from utils.uniformity_analyzer import analyze_run, resolve_design_label
+from utils.uniformity_analyzer import resolve_design_label
 from utils.design_resolver import is_multi_material
 from utils.sp_parser import parse_sp
 
@@ -106,6 +108,16 @@ def _combo_label(des: dict) -> str:
 # ---------------------------------------------------------------------------
 # Shared chart + table panel
 # ---------------------------------------------------------------------------
+
+def _spline_smooth(x: list, y: list, n: int = 300):
+    """Return (xs, ys) — a smooth cubic spline through (x, y).
+    Falls back to the original points if fewer than 4 are provided."""
+    if len(x) < 4:
+        return x, y
+    cs = CubicSpline(x, y)
+    xs = np.linspace(x[0], x[-1], n)
+    return xs, cs(xs)
+
 
 def _material_labels(design: str) -> tuple[str, str]:
     """Infer (scale1_label, scale2_label) from design name."""
@@ -308,15 +320,17 @@ class _UniformityPanel(ttk.Frame):
             pv1     = (max(norm1) - min(norm1)) * 100
             mat1, mat2 = _material_labels(s.run.design)
 
-            ax.plot(radii, norm1, "o-", color="steelblue",
-                    linewidth=1.5, markersize=4,
+            xs1, ys1 = _spline_smooth(radii, norm1)
+            ax.plot(xs1, ys1, "-", color="steelblue", linewidth=1.5)
+            ax.plot(radii, norm1, "o", color="steelblue", markersize=4,
                     label=f"{mat1}  {pv1:.2f}% p-v")
 
             if len(scales2) == len(scales1):
                 norm2 = [v / scales2[0] for v in scales2]
                 pv2   = (max(norm2) - min(norm2)) * 100
-                ax.plot(radii, norm2, "s--", color="darkorange",
-                        linewidth=1.5, markersize=4,
+                xs2, ys2 = _spline_smooth(radii, norm2)
+                ax.plot(xs2, ys2, "--", color="darkorange", linewidth=1.5)
+                ax.plot(radii, norm2, "s", color="darkorange", markersize=4,
                         label=f"{mat2}  {pv2:.2f}% p-v")
 
             ax.axhline(1.0, color="black", linewidth=0.7, linestyle="--")
@@ -336,73 +350,101 @@ class _UniformityPanel(ttk.Frame):
 # ---------------------------------------------------------------------------
 
 class _AddRunDialog(tk.Toplevel):
-    """Modal dialog to add a uniformity run from a P-file range."""
+    """Modal dialog: enter SP range → analyze in MacLeod → preview → save."""
 
     def __init__(self, parent: tk.Widget, db: UniformityDB,
                  spectro_dir: Path, on_done):
         super().__init__(parent)
         self.title("Add Uniformity Run")
-        self.resizable(False, False)
+        self.geometry("700x680")
+        self.resizable(True, True)
         self.grab_set()
         self.transient(parent)
-        self._db          = db
-        self._spectro_dir = spectro_dir
-        self._on_done     = on_done
+        self._db               = db
+        self._spectro_dir      = spectro_dir
+        self._on_done          = on_done
+        self._sp_files         = None
+        self._anchor           = None
+        self._analysis_results = None   # list of {radius, scale1, scale2, merit}
         self._build()
+
+    # ── Build ──────────────────────────────────────────────────────────────
 
     def _build(self) -> None:
         p = {"padx": 6, "pady": 3}
 
-        # ── SP range ──────────────────────────────────────────────────────
-        rng = ttk.LabelFrame(self, text="SP file range", padding=10)
-        rng.pack(fill=tk.X, padx=14, pady=(14, 4))
+        # SP range + run number + Analyze button (all in one row)
+        inp = ttk.LabelFrame(self, text="SP file range", padding=10)
+        inp.pack(fill=tk.X, padx=12, pady=(12, 4))
 
-        ttk.Label(rng, text="From P").grid(row=0, column=0, sticky="e", **p)
+        ttk.Label(inp, text="From P").grid(row=0, column=0, sticky="e", **p)
         self._start_var = tk.StringVar()
-        ttk.Entry(rng, textvariable=self._start_var, width=10).grid(
+        ttk.Entry(inp, textvariable=self._start_var, width=10).grid(
             row=0, column=1, sticky="w", **p)
 
-        ttk.Label(rng, text="To P").grid(row=0, column=2, sticky="e", **p)
+        ttk.Label(inp, text="To P").grid(row=0, column=2, sticky="e", **p)
         self._end_var = tk.StringVar()
-        ttk.Entry(rng, textvariable=self._end_var, width=10).grid(
+        ttk.Entry(inp, textvariable=self._end_var, width=10).grid(
             row=0, column=3, sticky="w", **p)
 
-        ttk.Button(rng, text="Preview", command=self._preview).grid(
-            row=0, column=4, padx=(12, 0))
-
-        # ── Preview / detected info ────────────────────────────────────────
-        self._preview_var = tk.StringVar()
-        ttk.Label(self, textvariable=self._preview_var, foreground="#444",
-                  wraplength=420, justify="left").pack(padx=14, pady=(4, 0))
-
-        # ── Run details ───────────────────────────────────────────────────
-        det = ttk.LabelFrame(self, text="Run details", padding=10)
-        det.pack(fill=tk.X, padx=14, pady=4)
-
-        ttk.Label(det, text="Run number:").grid(row=0, column=0, sticky="e", **p)
+        ttk.Label(inp, text="Run #").grid(row=0, column=4, sticky="e", **p)
         self._runnum_var = tk.StringVar()
-        ttk.Entry(det, textvariable=self._runnum_var, width=14).grid(
-            row=0, column=1, sticky="w", **p)
-        ttk.Label(det, text="optional — e.g. V6-439",
-                  foreground="gray").grid(row=0, column=2, sticky="w", **p)
+        ttk.Entry(inp, textvariable=self._runnum_var, width=10).grid(
+            row=0, column=5, sticky="w", **p)
+        ttk.Label(inp, text="optional", foreground="gray").grid(
+            row=0, column=6, sticky="w", padx=(0, 8))
 
-        # ── Error label ───────────────────────────────────────────────────
+        self._analyze_btn = ttk.Button(inp, text="Analyze",
+                                        command=self._start_analysis)
+        self._analyze_btn.grid(row=0, column=7, padx=(4, 0))
+
+        # Detected metadata line
+        self._info_var = tk.StringVar()
+        ttk.Label(self, textvariable=self._info_var, foreground="#444",
+                  wraplength=660).pack(padx=12, pady=(4, 0), anchor="w")
+
+        # Analysis log
+        log_frame = ttk.LabelFrame(self, text="Analysis log", padding=4)
+        log_frame.pack(fill=tk.X, padx=12, pady=4)
+
+        self._log = tk.Text(log_frame, height=8, state=tk.DISABLED,
+                            font=("Courier", 8), wrap=tk.WORD)
+        sb = ttk.Scrollbar(log_frame, orient=tk.VERTICAL, command=self._log.yview)
+        self._log.configure(yscrollcommand=sb.set)
+        self._log.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        sb.pack(side=tk.RIGHT, fill=tk.Y)
+
+        # Uniformity preview chart
+        chart_frame = ttk.LabelFrame(self, text="Uniformity profile", padding=4)
+        chart_frame.pack(fill=tk.BOTH, expand=True, padx=12, pady=4)
+
+        self._fig = Figure(figsize=(8, 2.6), dpi=88, layout="constrained")
+        self._chart_canvas = FigureCanvasTkAgg(self._fig, master=chart_frame)
+        self._chart_canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+
+        # Error label
         self._err_var = tk.StringVar()
         ttk.Label(self, textvariable=self._err_var, foreground="red",
-                  wraplength=420, justify="left").pack(padx=14)
+                  wraplength=660).pack(padx=12)
 
-        # ── Buttons ───────────────────────────────────────────────────────
+        # Buttons
         btns = ttk.Frame(self)
-        btns.pack(fill=tk.X, padx=14, pady=(6, 14))
+        btns.pack(fill=tk.X, padx=12, pady=(4, 12))
         ttk.Button(btns, text="Cancel", command=self.destroy).pack(
             side=tk.RIGHT, padx=4)
-        self._add_btn = ttk.Button(btns, text="Add Run", command=self._add)
-        self._add_btn.pack(side=tk.RIGHT, padx=4)
+        self._save_btn = ttk.Button(btns, text="Save to Dashboard",
+                                     command=self._save, state=tk.DISABLED)
+        self._save_btn.pack(side=tk.RIGHT, padx=4)
 
     # ── Helpers ────────────────────────────────────────────────────────────
 
+    def _log_append(self, msg: str) -> None:
+        self._log.configure(state=tk.NORMAL)
+        self._log.insert(tk.END, msg + "\n")
+        self._log.see(tk.END)
+        self._log.configure(state=tk.DISABLED)
+
     def _parse_range(self):
-        """Return (paths, error_str). paths is [] on error."""
         try:
             start = int(self._start_var.get().strip().lstrip("Pp"))
             end   = int(self._end_var.get().strip().lstrip("Pp"))
@@ -418,37 +460,24 @@ class _AddRunDialog(tk.Toplevel):
             return [], f"Not found: {', '.join(missing)}"
         return paths, ""
 
-    def _preview(self) -> None:
-        self._err_var.set("")
-        self._preview_var.set("")
-        paths, err = self._parse_range()
-        if err:
-            self._err_var.set(err)
-            return
-        try:
-            sp_files = [parse_sp(p) for p in paths]
-        except Exception as e:
-            self._err_var.set(str(e))
-            return
-        anchor = next((s for s in sp_files
-                       if s.chamber and s.design_name and s.date), None)
-        if anchor is None:
-            self._err_var.set(
-                "No anchor file found — first file must have a full uniformity header "
-                "(Chamber-Unif Design Date, F=…, R=…)")
-            return
-        radii = [s.radius for s in sp_files if s.radius is not None]
-        self._preview_var.set(
-            f"Detected:  {anchor.chamber}  |  {anchor.design_name}  |  "
-            f"{anchor.date}  |  F={anchor.f_factor}  |  "
-            f"Radii: {', '.join(str(r) for r in sorted(radii))}\"")
+    # ── Analysis ───────────────────────────────────────────────────────────
 
-    def _add(self) -> None:
+    def _start_analysis(self) -> None:
         self._err_var.set("")
+        self._info_var.set("")
+        self._analysis_results = None
+        self._save_btn.configure(state=tk.DISABLED)
+        self._log.configure(state=tk.NORMAL)
+        self._log.delete("1.0", tk.END)
+        self._log.configure(state=tk.DISABLED)
+        self._fig.clear()
+        self._chart_canvas.draw()
+
         paths, err = self._parse_range()
         if err:
             self._err_var.set(err)
             return
+
         try:
             sp_files = [parse_sp(p) for p in paths]
         except Exception as e:
@@ -459,21 +488,149 @@ class _AddRunDialog(tk.Toplevel):
                        if s.chamber and s.design_name and s.date), None)
         if anchor is None:
             self._err_var.set(
-                "No anchor file found in range — the first SP file must contain "
-                "the full uniformity header.")
+                "No anchor file found — first SP file must have a full uniformity header.")
             return
 
-        run, measurements = _build_records(anchor, anchor.path.name, sp_files)
+        radii = sorted(s.radius for s in sp_files if s.radius is not None)
+        self._info_var.set(
+            f"{anchor.chamber}  |  {anchor.design_name}  |  {anchor.date}  |  "
+            f"F={anchor.f_factor}  |  Radii: {', '.join(str(r) for r in radii)}\""
+        )
+        self._sp_files = sp_files
+        self._anchor   = anchor
+        self._analyze_btn.configure(state=tk.DISABLED)
+        threading.Thread(target=self._run_analysis, daemon=True).start()
 
+    def _run_analysis(self) -> None:
+        def log(msg):
+            self.after(0, lambda m=msg: self._log_append(m))
+
+        try:
+            import win32com.client
+            from utils.design_resolver import (find_design_file,
+                                               identify_primary_material,
+                                               is_multi_material)
+            from macleod.com_interface import get_layers, set_targets_from_sp
+            from utils.uniformity_analyzer import _run_generalised_simplex
+        except ImportError as e:
+            self.after(0, lambda: self._err_var.set(f"Import error: {e}"))
+            self.after(0, lambda: self._analyze_btn.configure(state=tk.NORMAL))
+            return
+
+        anchor = self._anchor
+        multi  = is_multi_material(anchor.design_name, [])
+        dds    = find_design_file(anchor.chamber, anchor.design_name, multi)
+        if dds is None:
+            self.after(0, lambda: self._err_var.set(
+                f"No reference design found for {anchor.chamber} / {anchor.design_name}"))
+            self.after(0, lambda: self._analyze_btn.configure(state=tk.NORMAL))
+            return
+
+        log(f"Design: {dds.name}")
+
+        try:
+            session    = win32com.client.Dispatch("EMacleod.Session")
+            design_obj = session.OpenDesign(str(dds.resolve()))
+            if isinstance(design_obj, tuple):
+                design_obj = design_obj[0]
+        except Exception as e:
+            self.after(0, lambda: self._err_var.set(f"MacLeod error: {e}"))
+            self.after(0, lambda: self._analyze_btn.configure(state=tk.NORMAL))
+            return
+
+        nominal        = get_layers(design_obj)
+        layer_materials = [l["material"] for l in nominal]
+        primary_kw     = identify_primary_material(anchor.design_name, layer_materials)
+        if not primary_kw:
+            self.after(0, lambda: self._err_var.set("Could not identify primary material"))
+            self.after(0, lambda: self._analyze_btn.configure(state=tk.NORMAL))
+            return
+
+        log(f"Primary material: {primary_kw}  ({len(nominal)} layers)")
+
+        results = []
+        sp_with_radius = sorted(
+            (s for s in self._sp_files if s.radius is not None and s.wavelengths),
+            key=lambda s: s.radius,
+        )
+        for sp in sp_with_radius:
+            set_targets_from_sp(design_obj, sp.wavelengths, sp.transmittances)
+            r = _run_generalised_simplex(design_obj, nominal, primary_kw)
+            r["radius"] = sp.radius
+            results.append(r)
+            dev1 = (r["scale1"] - 1.0) * 100
+            dev2 = (r["scale2"] - 1.0) * 100 if r.get("scale2") else 0.0
+            log(f"  R={sp.radius}\"  {primary_kw}: {dev1:+.2f}%  "
+                f"secondary: {dev2:+.2f}%  merit={r['merit']:.4f}")
+
+        log(f"Done — {len(results)}/{len(sp_with_radius)} radii")
+        self._analysis_results = results
+        self.after(0, self._on_analysis_complete)
+
+    def _on_analysis_complete(self) -> None:
+        self._analyze_btn.configure(state=tk.NORMAL)
+        if not self._analysis_results:
+            return
+        self._save_btn.configure(state=tk.NORMAL)
+        self._draw_preview_chart()
+
+    def _draw_preview_chart(self) -> None:
+        results = self._analysis_results
+        if not results:
+            return
+
+        radii   = [r["radius"]  for r in results]
+        scales1 = [r["scale1"]  for r in results]
+        scales2 = [r["scale2"]  for r in results if r.get("scale2") is not None]
+        norm1   = [s / scales1[0] for s in scales1]
+        pv1     = (max(norm1) - min(norm1)) * 100
+        mat1, mat2 = _material_labels(self._anchor.design_name)
+
+        self._fig.clear()
+        ax = self._fig.add_subplot(111)
+        xs1, ys1 = _spline_smooth(radii, norm1)
+        ax.plot(xs1, ys1, "-", color="steelblue", linewidth=1.5)
+        ax.plot(radii, norm1, "o", color="steelblue", markersize=4,
+                label=f"{mat1}  {pv1:.2f}% p-v")
+
+        if len(scales2) == len(scales1):
+            norm2 = [s / scales2[0] for s in scales2]
+            pv2   = (max(norm2) - min(norm2)) * 100
+            xs2, ys2 = _spline_smooth(radii, norm2)
+            ax.plot(xs2, ys2, "--", color="darkorange", linewidth=1.5)
+            ax.plot(radii, norm2, "s", color="darkorange", markersize=4,
+                    label=f"{mat2}  {pv2:.2f}% p-v")
+
+        ax.axhline(1.0, color="black", linewidth=0.7, linestyle="--")
+        label = (self._runnum_var.get().strip()
+                 or f"{self._anchor.chamber} {self._anchor.date}")
+        ax.set_title(label, fontsize=9)
+        ax.set_xlabel('Radius (")', fontsize=8)
+        ax.set_ylabel("Normalized thickness", fontsize=8)
+        ax.tick_params(labelsize=7)
+        ax.grid(True, linewidth=0.4, alpha=0.5)
+        ax.legend(fontsize=8)
+        self._chart_canvas.draw()
+
+    # ── Save ───────────────────────────────────────────────────────────────
+
+    def _save(self) -> None:
+        if not self._analysis_results or not self._anchor:
+            return
+
+        run, measurements = _build_records(
+            self._anchor, self._anchor.path.name, self._sp_files)
         run_number = self._runnum_var.get().strip()
         if run_number:
             run.run_number = run_number
 
         run_id = self._db.save_run(run, measurements)
         if run_id < 0:
-            self._err_var.set(
-                "This run is already in the database (anchor file already exists).")
+            self._err_var.set("This run is already in the database.")
             return
+
+        for r in self._analysis_results:
+            self._db.set_scales(run_id, r["radius"], r["scale1"], r.get("scale2"))
 
         self._on_done()
         self.destroy()
@@ -555,12 +712,6 @@ class HealthDashboard(tk.Tk):
         ttk.Label(sub, textvariable=self._single_ref_var,
                   foreground="#555", width=30).pack(side=tk.LEFT, padx=(2, 8))
 
-        self._single_analyze_btn = ttk.Button(
-            sub, text="Analyze visible runs",
-            command=lambda: self._analyze_async(self._single_summaries, self._single_panel),
-        )
-        self._single_analyze_btn.pack(side=tk.LEFT)
-
         self._single_summaries: List[RunSummary] = []
         self._single_panel = _UniformityPanel(frame, show_run_number=True)
         self._single_panel.pack(fill=tk.BOTH, expand=True)
@@ -590,12 +741,6 @@ class HealthDashboard(tk.Tk):
         self._combo_ref_var = tk.StringVar(value="—")
         ttk.Label(sub, textvariable=self._combo_ref_var,
                   foreground="#555", width=30).pack(side=tk.LEFT, padx=(2, 8))
-
-        self._combo_analyze_btn = ttk.Button(
-            sub, text="Analyze visible runs",
-            command=lambda: self._analyze_async(self._combo_summaries, self._combo_panel),
-        )
-        self._combo_analyze_btn.pack(side=tk.LEFT)
 
         self._combo_summaries: List[RunSummary] = []
         self._combo_panel = _UniformityPanel(frame, show_run_number=True)
@@ -654,52 +799,6 @@ class HealthDashboard(tk.Tk):
         self._combo_ref_var.set(ref)
 
         self._combo_panel.update_display(runs, title=f"{ch}  —  {label}")
-
-    # ── Background analysis ───────────────────────────────────────────────
-
-    def _analyze_async(
-        self,
-        summaries: List[RunSummary],
-        panel: "_UniformityPanel",
-    ) -> None:
-        """Run MacLeod analysis for all visible runs in a background thread."""
-        if not summaries:
-            messagebox.showinfo("Analyze", "No runs to analyse for this selection.")
-            return
-
-        kws = [d.get("keywords", []) for d in self._combos]
-
-        def worker():
-            for i, s in enumerate(summaries):
-                self.after(0, lambda i=i, s=s: self._status_var.set(
-                    f"Analysing run {i+1}/{len(summaries)}: "
-                    f"{s.run.chamber} {s.run.date} {s.run.run_number or ''}…"
-                ))
-                try:
-                    analyze_run(
-                        s, self._db,
-                        combo_keywords=kws,
-                        progress=lambda m: self.after(
-                            0, lambda msg=m: self._status_var.set(msg)
-                        ),
-                    )
-                except Exception as exc:
-                    self.after(0, lambda e=exc: self._status_var.set(f"Error: {e}"))
-
-            # Reload DB and refresh panel
-            ch    = self._chamber_var.get()
-            fresh = self._db.runs_for_chamber(ch)
-            run_ids = {s.run.id for s in summaries}
-            updated = [s for s in fresh if s.run.id in run_ids]
-            self.after(0, lambda: panel.update_display(
-                updated,
-                title=panel._title,
-            ))
-            self.after(0, lambda: self._status_var.set(
-                f"Analysis done — {len(summaries)} run(s)"
-            ))
-
-        threading.Thread(target=worker, daemon=True).start()
 
     # ── Add run dialog ────────────────────────────────────────────────────
 
