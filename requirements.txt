@@ -4,3 +4,4 @@ scipy>=1.10
 pyyaml>=6.0
 matplotlib>=3.7
 openpyxl>=3.1
+PyMySQL>=1.1

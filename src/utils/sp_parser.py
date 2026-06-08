@@ -65,7 +65,7 @@ def parse_sp(path: str | Path) -> SPFile:
 
 def _parse_header_line(line: str, result: SPFile) -> None:
     # Full anchor: "V6-Unif HW 16L 06/03/2026, F=1.044, R=2"
-    m = re.match(r"^([^-]+)-Unif\s+(.+?)\s+(\d{2}/\d{2}/\d{4}),\s*F=([\d.]+),\s*R=([\d.]+)", line)
+    m = re.match(r"^([^-]+)-Unif\s+(.+?)\s+(\S+),\s*F=([\d.]+),\s*R=([\d.]+)", line)
     if m:
         result.chamber     = m.group(1).strip()
         result.design_name = m.group(2).strip()
