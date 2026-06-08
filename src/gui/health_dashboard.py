@@ -38,7 +38,6 @@ import matplotlib
 matplotlib.use("TkAgg")
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
 from matplotlib.figure import Figure
-import matplotlib.dates as mdates
 import yaml
 
 _SRC = Path(__file__).parent.parent
@@ -107,32 +106,47 @@ def _combo_label(des: dict) -> str:
 # Shared chart + table panel
 # ---------------------------------------------------------------------------
 
+def _material_labels(design: str) -> tuple[str, str]:
+    """Infer (scale1_label, scale2_label) from design name."""
+    d = design.lower()
+    if "hf" in d:
+        return "HfO₂", "SiO₂"
+    return "Ta₂O₅", "SiO₂"
+
+
 class _UniformityPanel(ttk.Frame):
-    """Reusable trend chart + run table, used in every tab."""
+    """Run table + per-run uniformity profile charts."""
 
     def __init__(self, parent: tk.Widget, *, show_run_number: bool = False):
         super().__init__(parent)
         self._show_run_number = show_run_number
         self._summaries: list[RunSummary] = []
+        self._title: str = ""
         self._sort_col: str = "date"
-        self._sort_asc: bool = False          # newest first by default
-        self._build_chart()
+        self._sort_asc: bool = False
+        self._build_chart_area()
         self._build_table()
 
     # ── Build ──────────────────────────────────────────────────────────────
 
-    def _build_chart(self) -> None:
-        self._fig = Figure(figsize=(10, 3.8), dpi=96)
-        self._ax  = self._fig.add_subplot(111)
-        self._fig.tight_layout(pad=2.0)
-
+    def _build_chart_area(self) -> None:
         frame = ttk.Frame(self)
         frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
-
+        self._fig = Figure(figsize=(10, 4.5), dpi=96, layout="constrained")
         self._canvas = FigureCanvasTkAgg(self._fig, master=frame)
         self._canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
         nav = NavigationToolbar2Tk(self._canvas, frame)
         nav.update()
+        self._show_placeholder()
+
+    def _show_placeholder(self) -> None:
+        self._fig.clear()
+        ax = self._fig.add_subplot(111)
+        ax.text(0.5, 0.5, "Select a run to view its uniformity profile",
+                ha="center", va="center", transform=ax.transAxes,
+                fontsize=11, color="gray")
+        ax.axis("off")
+        self._canvas.draw()
 
     def _build_table(self) -> None:
         frame = ttk.LabelFrame(self, text="Runs", padding=4)
@@ -158,7 +172,7 @@ class _UniformityPanel(ttk.Frame):
                 "score":    ("Score (% p-p)", 110),
             }
 
-        self._headings = headings   # keep for sort-indicator updates
+        self._headings = headings
         self._tree = ttk.Treeview(
             frame, columns=cols, show="headings", height=5,
             selectmode="extended",
@@ -169,7 +183,7 @@ class _UniformityPanel(ttk.Frame):
                 self._tree.heading(col, text=text, command=lambda c=col: self._sort_by(c))
             else:
                 self._tree.heading(col, text=text)
-            anchor = "center" if col in ("date","run_number","f_factor","score") else "w"
+            anchor = "center" if col in ("date", "run_number", "f_factor", "score") else "w"
             self._tree.column(col, width=width, anchor=anchor)
         self._refresh_sort_indicator()
         self._tree.bind("<<TreeviewSelect>>", lambda _: self._on_selection_changed())
@@ -185,72 +199,11 @@ class _UniformityPanel(ttk.Frame):
         self,
         summaries: list[RunSummary],
         title: str = "",
-        y_label: str | None = None,
+        y_label: str | None = None,   # kept for API compatibility, unused
     ) -> None:
-        # Auto-detect y axis: use scale deviation when any run has been analysed
-        use_scale = any(s.has_scale_data for s in summaries)
-        if y_label is None:
-            y_label = ("Thickness deviation (%)\nvs nominal design"
-                       if use_scale
-                       else "Peak shift Δλ (%)\nvs smallest radius")
-        self._update_chart(summaries, title, y_label, use_scale)
+        self._title = title
         self._update_table(summaries)
-
-    def _update_chart(
-        self, summaries: list[RunSummary], title: str,
-        y_label: str, use_scale: bool
-    ) -> None:
-        ax = self._ax
-        ax.clear()
-
-        if not summaries:
-            ax.set_title(title or "No data for selection")
-            self._canvas.draw()
-            return
-
-        all_radii = sorted({m.radius for s in summaries for m in s.measurements})
-        dates     = [_parse_date(s.run.date) for s in summaries]
-        use_dates = len(set(d.date() for d in dates)) > 1
-        x_vals    = dates if use_dates else list(range(len(summaries)))
-
-        # Reference peak wavelength per run (at smallest radius)
-        ref_nm = {
-            s.run.id: min(s.measurements, key=lambda m: m.radius).peak_nm
-            for s in summaries if s.measurements
-        }
-
-        for i, radius in enumerate(all_radii):
-            y, x_used = [], []
-            for xi, s in zip(x_vals, summaries):
-                m = next((m for m in s.measurements if m.radius == radius), None)
-                if m is not None:
-                    if use_scale and m.scale1 is not None:
-                        val = (m.scale1 - 1.0) * 100
-                    else:
-                        r = ref_nm.get(s.run.id) or m.peak_nm
-                        val = m.shift_nm / r * 100
-                    y.append(val)
-                    x_used.append(xi)
-            if y:
-                ax.plot(x_used, y, "o-", color=_COLORS[i % len(_COLORS)],
-                        label=f'R={radius}"', linewidth=1.6, markersize=5)
-
-        ax.axhline(0, color="black", linewidth=0.5, linestyle="--")
-        ax.set_title(title, fontsize=10)
-        ax.set_ylabel(y_label, fontsize=8)
-
-        if use_dates:
-            ax.xaxis.set_major_formatter(mdates.DateFormatter("%m/%d/%y"))
-            ax.xaxis.set_major_locator(mdates.AutoDateLocator())
-            self._fig.autofmt_xdate(rotation=25, ha="right")
-        else:
-            ax.set_xlabel("Run index")
-
-        if all_radii:
-            ax.legend(loc="best", fontsize=8, ncol=min(3, len(all_radii)))
-        ax.grid(True, linewidth=0.4, alpha=0.5)
-        self._fig.tight_layout(pad=1.5)
-        self._canvas.draw()
+        self._show_placeholder()
 
     # ── Sorting ────────────────────────────────────────────────────────────
 
@@ -260,7 +213,6 @@ class _UniformityPanel(ttk.Frame):
             return _parse_date(s.run.date)
         if col == "run_number":
             rn = s.run.run_number or ""
-            # Extract numeric part for natural sort ("R15" → 15)
             m = re.search(r"\d+", rn)
             return (0 if rn else 1, int(m.group()) if m else 0)
         if col == "score":
@@ -281,10 +233,7 @@ class _UniformityPanel(ttk.Frame):
 
     def _refresh_sort_indicator(self) -> None:
         for col, (text, _) in self._headings.items():
-            if col == self._sort_col:
-                label = f"{text} {'▲' if self._sort_asc else '▼'}"
-            else:
-                label = text
+            label = f"{text} {'▲' if self._sort_asc else '▼'}" if col == self._sort_col else text
             self._tree.heading(col, text=label)
 
     def _update_table(self, summaries: list[RunSummary]) -> None:
@@ -307,8 +256,7 @@ class _UniformityPanel(ttk.Frame):
                 score_str = "—"
             if self._show_run_number:
                 rn       = s.run.run_number or "—"
-                ref      = (Path(s.run.design_file).stem
-                            if s.run.design_file else "—")
+                ref      = Path(s.run.design_file).stem if s.run.design_file else "—"
                 analysed = " *" if s.has_scale_data else ""
                 self._tree.insert("", tk.END, iid=str(s.run.id), values=(
                     s.run.date or "?", rn, s.run.design,
@@ -320,17 +268,66 @@ class _UniformityPanel(ttk.Frame):
                     s.run.date or "?", s.run.design, f_str, radii_str, score_str,
                 ))
 
+    # ── Selection → charts ─────────────────────────────────────────────────
+
     def _on_selection_changed(self) -> None:
         selected_ids = {int(iid) for iid in self._tree.selection()}
-        if selected_ids:
-            visible = [s for s in self._summaries if s.run.id in selected_ids]
-        else:
-            visible = self._summaries
-        title = self._ax.get_title()
-        use_scale = any(s.has_scale_data for s in visible)
-        y_label = ("Thickness deviation (%)\nvs nominal design"
-                   if use_scale else "Peak shift Δλ (%)\nvs smallest radius")
-        self._update_chart(visible, title, y_label, use_scale)
+        visible = [s for s in self._summaries if s.run.id in selected_ids] if selected_ids else []
+        self._draw_profiles(visible)
+
+    def _draw_profiles(self, summaries: list[RunSummary]) -> None:
+        scale_runs = [s for s in summaries if s.has_scale_data]
+
+        if not scale_runs:
+            self._show_placeholder()
+            return
+
+        n     = len(scale_runs)
+        ncols = min(n, 3)
+        nrows = (n + ncols - 1) // ncols
+
+        self._fig.clear()
+
+        for i, s in enumerate(scale_runs):
+            ax = self._fig.add_subplot(nrows, ncols, i + 1)
+
+            meas       = sorted(s.measurements, key=lambda m: m.radius)
+            scale_meas = [m for m in meas if m.scale1 is not None]
+
+            if not scale_meas:
+                ax.text(0.5, 0.5, "Not yet analyzed", ha="center", va="center",
+                        transform=ax.transAxes, color="gray", fontsize=9)
+                ax.axis("off")
+                continue
+
+            radii   = [m.radius for m in scale_meas]
+            scales1 = [m.scale1 for m in scale_meas]
+            scales2 = [m.scale2 for m in scale_meas if m.scale2 is not None]
+            norm1   = [v / scales1[0] for v in scales1]
+            pv1     = (max(norm1) - min(norm1)) * 100
+            mat1, mat2 = _material_labels(s.run.design)
+
+            ax.plot(radii, norm1, "o-", color="steelblue",
+                    linewidth=1.5, markersize=4,
+                    label=f"{mat1}  {pv1:.2f}% p-v")
+
+            if len(scales2) == len(scales1):
+                norm2 = [v / scales2[0] for v in scales2]
+                pv2   = (max(norm2) - min(norm2)) * 100
+                ax.plot(radii, norm2, "s--", color="darkorange",
+                        linewidth=1.5, markersize=4,
+                        label=f"{mat2}  {pv2:.2f}% p-v")
+
+            ax.axhline(1.0, color="black", linewidth=0.7, linestyle="--")
+            run_label = s.run.run_number or s.run.date or f"run {s.run.id}"
+            ax.set_title(run_label, fontsize=9)
+            ax.set_xlabel('Radius (")', fontsize=7)
+            ax.set_ylabel("Normalized thickness", fontsize=7)
+            ax.tick_params(labelsize=7)
+            ax.grid(True, linewidth=0.4, alpha=0.5)
+            ax.legend(fontsize=7, loc="best")
+
+        self._canvas.draw()
 
 
 # ---------------------------------------------------------------------------
@@ -548,7 +545,7 @@ class HealthDashboard(tk.Tk):
             updated = [s for s in fresh if s.run.id in run_ids]
             self.after(0, lambda: panel.update_display(
                 updated,
-                title=panel._ax.get_title(),
+                title=panel._title,
             ))
             self.after(0, lambda: self._status_var.set(
                 f"Analysis done — {len(summaries)} run(s)"
