@@ -45,9 +45,10 @@ if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
 from utils.uniformity_db import UniformityDB, RunSummary
-from utils.uniformity_scanner import scan, backfill_run_numbers, SPECTRO_DIR
+from utils.uniformity_scanner import SPECTRO_DIR, _build_records
 from utils.uniformity_analyzer import analyze_run, resolve_design_label
 from utils.design_resolver import is_multi_material
+from utils.sp_parser import parse_sp
 
 _DATE_FMT = "%m/%d/%Y"
 _COLORS   = ["#1f77b4","#ff7f0e","#2ca02c","#d62728",
@@ -331,6 +332,154 @@ class _UniformityPanel(ttk.Frame):
 
 
 # ---------------------------------------------------------------------------
+# Add-run dialog
+# ---------------------------------------------------------------------------
+
+class _AddRunDialog(tk.Toplevel):
+    """Modal dialog to add a uniformity run from a P-file range."""
+
+    def __init__(self, parent: tk.Widget, db: UniformityDB,
+                 spectro_dir: Path, on_done):
+        super().__init__(parent)
+        self.title("Add Uniformity Run")
+        self.resizable(False, False)
+        self.grab_set()
+        self.transient(parent)
+        self._db          = db
+        self._spectro_dir = spectro_dir
+        self._on_done     = on_done
+        self._build()
+
+    def _build(self) -> None:
+        p = {"padx": 6, "pady": 3}
+
+        # ── SP range ──────────────────────────────────────────────────────
+        rng = ttk.LabelFrame(self, text="SP file range", padding=10)
+        rng.pack(fill=tk.X, padx=14, pady=(14, 4))
+
+        ttk.Label(rng, text="From P").grid(row=0, column=0, sticky="e", **p)
+        self._start_var = tk.StringVar()
+        ttk.Entry(rng, textvariable=self._start_var, width=10).grid(
+            row=0, column=1, sticky="w", **p)
+
+        ttk.Label(rng, text="To P").grid(row=0, column=2, sticky="e", **p)
+        self._end_var = tk.StringVar()
+        ttk.Entry(rng, textvariable=self._end_var, width=10).grid(
+            row=0, column=3, sticky="w", **p)
+
+        ttk.Button(rng, text="Preview", command=self._preview).grid(
+            row=0, column=4, padx=(12, 0))
+
+        # ── Preview / detected info ────────────────────────────────────────
+        self._preview_var = tk.StringVar()
+        ttk.Label(self, textvariable=self._preview_var, foreground="#444",
+                  wraplength=420, justify="left").pack(padx=14, pady=(4, 0))
+
+        # ── Run details ───────────────────────────────────────────────────
+        det = ttk.LabelFrame(self, text="Run details", padding=10)
+        det.pack(fill=tk.X, padx=14, pady=4)
+
+        ttk.Label(det, text="Run number:").grid(row=0, column=0, sticky="e", **p)
+        self._runnum_var = tk.StringVar()
+        ttk.Entry(det, textvariable=self._runnum_var, width=14).grid(
+            row=0, column=1, sticky="w", **p)
+        ttk.Label(det, text="optional — e.g. V6-439",
+                  foreground="gray").grid(row=0, column=2, sticky="w", **p)
+
+        # ── Error label ───────────────────────────────────────────────────
+        self._err_var = tk.StringVar()
+        ttk.Label(self, textvariable=self._err_var, foreground="red",
+                  wraplength=420, justify="left").pack(padx=14)
+
+        # ── Buttons ───────────────────────────────────────────────────────
+        btns = ttk.Frame(self)
+        btns.pack(fill=tk.X, padx=14, pady=(6, 14))
+        ttk.Button(btns, text="Cancel", command=self.destroy).pack(
+            side=tk.RIGHT, padx=4)
+        self._add_btn = ttk.Button(btns, text="Add Run", command=self._add)
+        self._add_btn.pack(side=tk.RIGHT, padx=4)
+
+    # ── Helpers ────────────────────────────────────────────────────────────
+
+    def _parse_range(self):
+        """Return (paths, error_str). paths is [] on error."""
+        try:
+            start = int(self._start_var.get().strip().lstrip("Pp"))
+            end   = int(self._end_var.get().strip().lstrip("Pp"))
+        except ValueError:
+            return [], "Enter numeric P-file numbers (e.g. 1014134)"
+        if end < start:
+            return [], "End must be ≥ start"
+        if end - start > 50:
+            return [], "Range too large (max 50 files)"
+        paths = [self._spectro_dir / f"P{i}.SP" for i in range(start, end + 1)]
+        missing = [p.name for p in paths if not p.exists()]
+        if missing:
+            return [], f"Not found: {', '.join(missing)}"
+        return paths, ""
+
+    def _preview(self) -> None:
+        self._err_var.set("")
+        self._preview_var.set("")
+        paths, err = self._parse_range()
+        if err:
+            self._err_var.set(err)
+            return
+        try:
+            sp_files = [parse_sp(p) for p in paths]
+        except Exception as e:
+            self._err_var.set(str(e))
+            return
+        anchor = next((s for s in sp_files
+                       if s.chamber and s.design_name and s.date), None)
+        if anchor is None:
+            self._err_var.set(
+                "No anchor file found — first file must have a full uniformity header "
+                "(Chamber-Unif Design Date, F=…, R=…)")
+            return
+        radii = [s.radius for s in sp_files if s.radius is not None]
+        self._preview_var.set(
+            f"Detected:  {anchor.chamber}  |  {anchor.design_name}  |  "
+            f"{anchor.date}  |  F={anchor.f_factor}  |  "
+            f"Radii: {', '.join(str(r) for r in sorted(radii))}\"")
+
+    def _add(self) -> None:
+        self._err_var.set("")
+        paths, err = self._parse_range()
+        if err:
+            self._err_var.set(err)
+            return
+        try:
+            sp_files = [parse_sp(p) for p in paths]
+        except Exception as e:
+            self._err_var.set(str(e))
+            return
+
+        anchor = next((s for s in sp_files
+                       if s.chamber and s.design_name and s.date), None)
+        if anchor is None:
+            self._err_var.set(
+                "No anchor file found in range — the first SP file must contain "
+                "the full uniformity header.")
+            return
+
+        run, measurements = _build_records(anchor, anchor.path.name, sp_files)
+
+        run_number = self._runnum_var.get().strip()
+        if run_number:
+            run.run_number = run_number
+
+        run_id = self._db.save_run(run, measurements)
+        if run_id < 0:
+            self._err_var.set(
+                "This run is already in the database (anchor file already exists).")
+            return
+
+        self._on_done()
+        self.destroy()
+
+
+# ---------------------------------------------------------------------------
 # Main window
 # ---------------------------------------------------------------------------
 
@@ -366,10 +515,9 @@ class HealthDashboard(tk.Tk):
         self._chamber_cb.pack(side=tk.LEFT, padx=(2, 16))
         self._chamber_cb.bind("<<ComboboxSelected>>", self._on_chamber_changed)
 
-        self._scan_btn = ttk.Button(
-            toolbar, text="Scan new data", command=self._scan_async,
-        )
-        self._scan_btn.pack(side=tk.RIGHT, padx=4)
+        ttk.Button(
+            toolbar, text="Add uniformity run", command=self._open_add_dialog,
+        ).pack(side=tk.RIGHT, padx=4)
         self._status_var = tk.StringVar()
         ttk.Label(toolbar, textvariable=self._status_var,
                   foreground="gray").pack(side=tk.RIGHT, padx=8)
@@ -553,41 +701,13 @@ class HealthDashboard(tk.Tk):
 
         threading.Thread(target=worker, daemon=True).start()
 
-    # ── Background scan ───────────────────────────────────────────────────
+    # ── Add run dialog ────────────────────────────────────────────────────
 
-    def _scan_async(self) -> None:
-        self._scan_btn.config(state=tk.DISABLED)
-        self._status_var.set("Scanning…")
-
-        def worker():
-            try:
-                n = scan(
-                    self._db,
-                    spectro_dir=self._spectro_dir,
-                    progress=lambda m: self.after(
-                        0, lambda msg=m: self._status_var.set(msg)
-                    ),
-                )
-                backfill_run_numbers(
-                    self._db,
-                    progress=lambda m: self.after(
-                        0, lambda msg=m: self._status_var.set(msg)
-                    ),
-                )
-                self.after(0, lambda: self._scan_done(n))
-            except Exception as exc:
-                self.after(0, lambda: messagebox.showerror("Scan error", str(exc)))
-                self.after(0, self._scan_reset)
-
-        threading.Thread(target=worker, daemon=True).start()
-
-    def _scan_done(self, n: int) -> None:
-        self._scan_reset()
-        self._status_var.set(f"{n} new run(s) added")
-        self._refresh_chambers()
-
-    def _scan_reset(self) -> None:
-        self._scan_btn.config(state=tk.NORMAL)
+    def _open_add_dialog(self) -> None:
+        _AddRunDialog(
+            self, self._db, self._spectro_dir,
+            on_done=self._refresh_chambers,
+        )
 
 
 # ---------------------------------------------------------------------------
