@@ -23,10 +23,11 @@ import re
 from pathlib import Path
 from typing import Optional
 
-_UNIFORMITY_DESIGNS = (
-    Path(r"C:\Users\User\FiveNine Dropbox\FiveNine Optics Team Folder"
-         r"\Coating Designs\Chamber Uniformity")
+DESIGNS_ROOT = Path(
+    r"C:\Users\User\FiveNine Dropbox\FiveNine Optics Team Folder"
+    r"\Coating Designs\Chamber Uniformity"
 )
+_UNIFORMITY_DESIGNS = DESIGNS_ROOT  # backward-compat alias
 
 
 # ---------------------------------------------------------------------------
@@ -139,4 +140,14 @@ def list_available(chamber: str, base_dir: Path | None = None) -> dict[str, list
             [p.name for p in sorted(folder.glob("*.dds"))]
             if folder.exists() else []
         )
+    return result
+
+
+def list_available_paths(chamber: str, base_dir: Path | None = None) -> dict[str, list[Path]]:
+    """Return {'Single material': [Path, ...], 'Multi material': [Path, ...]}."""
+    root = Path(base_dir) if base_dir else _UNIFORMITY_DESIGNS
+    result: dict[str, list[Path]] = {}
+    for sub in ("Single material", "Multi material"):
+        folder = root / chamber / sub
+        result[sub] = sorted(folder.glob("*.dds")) if folder.exists() else []
     return result

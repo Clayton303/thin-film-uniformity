@@ -356,7 +356,7 @@ class _AddRunDialog(tk.Toplevel):
                  spectro_dir: Path, on_done):
         super().__init__(parent)
         self.title("Add Uniformity Run")
-        self.geometry("700x680")
+        self.geometry("700x720")
         self.resizable(True, True)
         self.grab_set()
         self.transient(parent)
@@ -366,6 +366,8 @@ class _AddRunDialog(tk.Toplevel):
         self._sp_files         = None
         self._anchor           = None
         self._analysis_results = None   # list of {radius, scale1, scale2, merit}
+        self._design_name_map: dict[str, Path] = {}   # combobox label → .dds path
+        self._selected_dds: Path | None = None
         self._build()
 
     # ── Build ──────────────────────────────────────────────────────────────
@@ -373,9 +375,10 @@ class _AddRunDialog(tk.Toplevel):
     def _build(self) -> None:
         p = {"padx": 6, "pady": 3}
 
-        # SP range + run number + Analyze button (all in one row)
+        # Row 0: SP range + run number + Preview button
         inp = ttk.LabelFrame(self, text="SP file range", padding=10)
         inp.pack(fill=tk.X, padx=12, pady=(12, 4))
+        inp.columnconfigure(3, weight=1)   # combobox column stretches
 
         ttk.Label(inp, text="From P").grid(row=0, column=0, sticky="e", **p)
         self._start_var = tk.StringVar()
@@ -394,9 +397,22 @@ class _AddRunDialog(tk.Toplevel):
         ttk.Label(inp, text="optional", foreground="gray").grid(
             row=0, column=6, sticky="w", padx=(0, 8))
 
+        self._preview_btn = ttk.Button(inp, text="Preview",
+                                        command=self._do_preview)
+        self._preview_btn.grid(row=0, column=7, padx=(4, 0))
+
+        # Row 1: Reference design selector + Analyze button
+        ttk.Label(inp, text="Reference design:").grid(
+            row=1, column=0, columnspan=2, sticky="e", **p)
+        self._design_var = tk.StringVar()
+        self._design_cb  = ttk.Combobox(inp, textvariable=self._design_var,
+                                         state="disabled", width=44)
+        self._design_cb.grid(row=1, column=2, columnspan=5, sticky="ew", **p)
+
         self._analyze_btn = ttk.Button(inp, text="Analyze",
-                                        command=self._start_analysis)
-        self._analyze_btn.grid(row=0, column=7, padx=(4, 0))
+                                        command=self._start_analysis,
+                                        state=tk.DISABLED)
+        self._analyze_btn.grid(row=1, column=7, padx=(4, 0))
 
         # Detected metadata line
         self._info_var = tk.StringVar()
@@ -462,16 +478,16 @@ class _AddRunDialog(tk.Toplevel):
 
     # ── Analysis ───────────────────────────────────────────────────────────
 
-    def _start_analysis(self) -> None:
+    def _do_preview(self) -> None:
+        """Stage 1: parse SP files, detect anchor, populate design dropdown."""
         self._err_var.set("")
         self._info_var.set("")
         self._analysis_results = None
         self._save_btn.configure(state=tk.DISABLED)
-        self._log.configure(state=tk.NORMAL)
-        self._log.delete("1.0", tk.END)
-        self._log.configure(state=tk.DISABLED)
-        self._fig.clear()
-        self._chart_canvas.draw()
+        self._analyze_btn.configure(state=tk.DISABLED)
+        self._design_cb.configure(state="disabled")
+        self._design_var.set("")
+        self._design_name_map = {}
 
         paths, err = self._parse_range()
         if err:
@@ -498,6 +514,66 @@ class _AddRunDialog(tk.Toplevel):
         )
         self._sp_files = sp_files
         self._anchor   = anchor
+
+        # Populate design dropdown from available .dds files for this chamber
+        try:
+            from utils.design_resolver import (list_available_paths,
+                                                find_design_file,
+                                                is_multi_material)
+        except ImportError as e:
+            self._err_var.set(f"Import error: {e}")
+            return
+
+        available = list_available_paths(anchor.chamber)
+        options: list[str] = []
+        name_map: dict[str, Path] = {}
+
+        for category in ("Single material", "Multi material"):
+            tag = "Single" if category.startswith("S") else "Multi"
+            for dds_path in available.get(category, []):
+                label = f"[{tag}]  {dds_path.stem}"
+                options.append(label)
+                name_map[label] = dds_path
+
+        self._design_name_map = name_map
+
+        if not options:
+            self._err_var.set(
+                f"No reference designs found for chamber {anchor.chamber}. "
+                "Add .dds files to Chamber Uniformity/{chamber}/.")
+            return
+
+        self._design_cb["values"] = options
+        self._design_cb.configure(state="readonly")
+
+        # Pre-select best fuzzy match
+        multi   = is_multi_material(anchor.design_name, [])
+        best    = find_design_file(anchor.chamber, anchor.design_name, multi)
+        default = options[0]
+        if best:
+            for label, path in name_map.items():
+                if path.resolve() == best.resolve():
+                    default = label
+                    break
+        self._design_var.set(default)
+        self._analyze_btn.configure(state=tk.NORMAL)
+
+    def _start_analysis(self) -> None:
+        """Stage 2: run MacLeod analysis using the selected reference design."""
+        selected = self._design_var.get()
+        if not selected or selected not in self._design_name_map:
+            self._err_var.set("Select a reference design from the dropdown.")
+            return
+
+        self._selected_dds = self._design_name_map[selected]
+        self._err_var.set("")
+        self._analysis_results = None
+        self._save_btn.configure(state=tk.DISABLED)
+        self._log.configure(state=tk.NORMAL)
+        self._log.delete("1.0", tk.END)
+        self._log.configure(state=tk.DISABLED)
+        self._fig.clear()
+        self._chart_canvas.draw()
         self._analyze_btn.configure(state=tk.DISABLED)
         threading.Thread(target=self._run_analysis, daemon=True).start()
 
@@ -507,9 +583,7 @@ class _AddRunDialog(tk.Toplevel):
 
         try:
             import win32com.client
-            from utils.design_resolver import (find_design_file,
-                                               identify_primary_material,
-                                               is_multi_material)
+            from utils.design_resolver import identify_primary_material
             from macleod.com_interface import get_layers, set_targets_from_sp
             from utils.uniformity_analyzer import _run_generalised_simplex
         except ImportError as e:
@@ -517,14 +591,8 @@ class _AddRunDialog(tk.Toplevel):
             self.after(0, lambda: self._analyze_btn.configure(state=tk.NORMAL))
             return
 
+        dds    = self._selected_dds
         anchor = self._anchor
-        multi  = is_multi_material(anchor.design_name, [])
-        dds    = find_design_file(anchor.chamber, anchor.design_name, multi)
-        if dds is None:
-            self.after(0, lambda: self._err_var.set(
-                f"No reference design found for {anchor.chamber} / {anchor.design_name}"))
-            self.after(0, lambda: self._analyze_btn.configure(state=tk.NORMAL))
-            return
 
         log(f"Design: {dds.name}")
 
@@ -538,9 +606,10 @@ class _AddRunDialog(tk.Toplevel):
             self.after(0, lambda: self._analyze_btn.configure(state=tk.NORMAL))
             return
 
-        nominal        = get_layers(design_obj)
+        nominal         = get_layers(design_obj)
         layer_materials = [l["material"] for l in nominal]
-        primary_kw     = identify_primary_material(anchor.design_name, layer_materials)
+        # Use the selected .dds stem for material ID (overrides SP header design name)
+        primary_kw      = identify_primary_material(dds.stem, layer_materials)
         if not primary_kw:
             self.after(0, lambda: self._err_var.set("Could not identify primary material"))
             self.after(0, lambda: self._analyze_btn.configure(state=tk.NORMAL))
@@ -584,7 +653,8 @@ class _AddRunDialog(tk.Toplevel):
         scales2 = [r["scale2"]  for r in results if r.get("scale2") is not None]
         norm1   = [s / scales1[0] for s in scales1]
         pv1     = (max(norm1) - min(norm1)) * 100
-        mat1, mat2 = _material_labels(self._anchor.design_name)
+        design_label = self._selected_dds.stem if self._selected_dds else self._anchor.design_name
+        mat1, mat2   = _material_labels(design_label)
 
         self._fig.clear()
         ax = self._fig.add_subplot(111)
