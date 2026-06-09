@@ -64,12 +64,18 @@ def parse_sp(path: str | Path) -> SPFile:
 
 
 def _parse_header_line(line: str, result: SPFile) -> None:
-    # Full anchor: "V6-Unif HW 16L 06/03/2026, F=1.044, R=2"
-    m = re.match(r"^([^-]+)-Unif\s+(.+?)\s+(\S+),\s*F=([\d.]+),\s*R=([\d.]+)", line)
+    # Full anchor — handles both formats:
+    #   "V6-Unif HW 16L 06/03/2026, F=1.044, R=2"   (original)
+    #   "V1 Uniformity HW 16L 5-12-26 F=1.044, R=2"  (space + full word, no comma before F)
+    m = re.match(
+        r"^([A-Za-z0-9]+)[-\s]+Unif(?:ormity)?\s+(.+?)\s+(\S+)[,\s]+F=([\d.]+)[,\s]+R=([\d.]+)",
+        line,
+        re.IGNORECASE,
+    )
     if m:
         result.chamber     = m.group(1).strip()
         result.design_name = m.group(2).strip()
-        result.date        = m.group(3).strip()
+        result.date        = m.group(3).strip().rstrip(",")
         result.f_factor    = float(m.group(4))
         result.radius      = float(m.group(5))
         return

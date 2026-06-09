@@ -465,16 +465,17 @@ class _AddRunDialog(tk.Toplevel):
             start = int(self._start_var.get().strip().lstrip("Pp"))
             end   = int(self._end_var.get().strip().lstrip("Pp"))
         except ValueError:
-            return [], "Enter numeric P-file numbers (e.g. 1014134)"
+            return [], [], "Enter numeric P-file numbers (e.g. 1014134)"
         if end < start:
-            return [], "End must be ≥ start"
+            return [], [], "End must be ≥ start"
         if end - start > 50:
-            return [], "Range too large (max 50 files)"
-        paths = [self._spectro_dir / f"P{i}.SP" for i in range(start, end + 1)]
-        missing = [p.name for p in paths if not p.exists()]
-        if missing:
-            return [], f"Not found: {', '.join(missing)}"
-        return paths, ""
+            return [], [], "Range too large (max 50 files)"
+        all_paths  = [self._spectro_dir / f"P{i}.SP" for i in range(start, end + 1)]
+        found      = [p for p in all_paths if p.exists()]
+        skipped    = [p.name for p in all_paths if not p.exists()]
+        if not found:
+            return [], [], "No SP files found in that range."
+        return found, skipped, ""
 
     # ── Analysis ───────────────────────────────────────────────────────────
 
@@ -489,7 +490,7 @@ class _AddRunDialog(tk.Toplevel):
         self._design_var.set("")
         self._design_name_map = {}
 
-        paths, err = self._parse_range()
+        paths, skipped, err = self._parse_range()
         if err:
             self._err_var.set(err)
             return
@@ -503,14 +504,21 @@ class _AddRunDialog(tk.Toplevel):
         anchor = next((s for s in sp_files
                        if s.chamber and s.design_name and s.date), None)
         if anchor is None:
+            loaded = ", ".join(p.name for p in paths)
+            skip_note = f"  (skipped: {', '.join(skipped)})" if skipped else ""
             self._err_var.set(
-                "No anchor file found — first SP file must have a full uniformity header.")
+                f"No anchor file found in: {loaded}{skip_note}\n"
+                "The anchor file must contain a full header like:\n"
+                "  V6-Unif HW 16L 06/03/2026, F=1.044, R=2"
+            )
             return
 
         radii = sorted(s.radius for s in sp_files if s.radius is not None)
+        skip_note = f"  (skipped {len(skipped)}: {', '.join(skipped)})" if skipped else ""
         self._info_var.set(
             f"{anchor.chamber}  |  {anchor.design_name}  |  {anchor.date}  |  "
             f"F={anchor.f_factor}  |  Radii: {', '.join(str(r) for r in radii)}\""
+            f"{skip_note}"
         )
         self._sp_files = sp_files
         self._anchor   = anchor
