@@ -612,6 +612,13 @@ class _AddRunDialog(tk.Toplevel):
         threading.Thread(target=self._run_analysis, daemon=True).start()
 
     def _run_analysis(self) -> None:
+        # COM must be initialised on every thread that uses it
+        try:
+            import pythoncom
+            pythoncom.CoInitialize()
+        except Exception:
+            pass   # not available on non-Windows; will fail later at Dispatch
+
         def log(msg):
             self.after(0, lambda m=msg: self._log_append(m))
 
@@ -636,7 +643,9 @@ class _AddRunDialog(tk.Toplevel):
             if isinstance(design_obj, tuple):
                 design_obj = design_obj[0]
         except Exception as e:
-            self.after(0, lambda: self._err_var.set(f"MacLeod error: {e}"))
+            msg = f"MacLeod error: {e}"
+            log(msg)
+            self.after(0, lambda m=msg: self._err_var.set(m))
             self.after(0, lambda: self._analyze_btn.configure(state=tk.NORMAL))
             return
 
@@ -669,6 +678,12 @@ class _AddRunDialog(tk.Toplevel):
         log(f"Done — {len(results)}/{len(sp_with_radius)} radii")
         self._analysis_results = results
         self.after(0, self._on_analysis_complete)
+
+        try:
+            import pythoncom
+            pythoncom.CoUninitialize()
+        except Exception:
+            pass
 
     def _on_analysis_complete(self) -> None:
         self._analyze_btn.configure(state=tk.NORMAL)
