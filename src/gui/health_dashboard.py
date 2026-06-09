@@ -109,6 +109,22 @@ def _combo_label(des: dict) -> str:
 # Shared chart + table panel
 # ---------------------------------------------------------------------------
 
+def _pv_tag(pv: float) -> str:
+    """Traffic-light tag name for a p-v uniformity score (%)."""
+    if pv < 0.5:
+        return "pv_green"
+    if pv <= 1.0:
+        return "pv_yellow"
+    return "pv_red"
+
+# Foreground colors for chart legend text (dark enough to read on white)
+_PV_TEXT_COLOR = {
+    "pv_green":  "darkgreen",
+    "pv_yellow": "darkorange",
+    "pv_red":    "darkred",
+}
+
+
 def _spline_smooth(x: list, y: list, n: int = 300):
     """Return (xs, ys) — a smooth cubic spline through (x, y).
     Falls back to the original points if fewer than 4 are provided."""
@@ -200,6 +216,9 @@ class _UniformityPanel(ttk.Frame):
             self._tree.column(col, width=width, anchor=anchor)
         self._refresh_sort_indicator()
         self._tree.bind("<<TreeviewSelect>>", lambda _: self._on_selection_changed())
+        self._tree.tag_configure("pv_green",  background="#c6efce")
+        self._tree.tag_configure("pv_yellow", background="#ffeb9c")
+        self._tree.tag_configure("pv_red",    background="#ffc7ce")
 
         sb = ttk.Scrollbar(frame, orient=tk.VERTICAL, command=self._tree.yview)
         self._tree.configure(yscrollcommand=sb.set)
@@ -260,24 +279,27 @@ class _UniformityPanel(ttk.Frame):
         ordered = sorted(self._summaries, key=self._sort_key, reverse=not self._sort_asc)
         for s in ordered:
             radii_str = "  ".join(f'{m.radius}"' for m in s.measurements)
+            score_float: float | None = None
             if s.has_scale_data:
-                score_str = f"{s.uniformity_score:.3f}"
+                score_float = s.uniformity_score
+                score_str   = f"{score_float:.3f}"
             elif s.measurements:
                 ref_nm = min(s.measurements, key=lambda m: m.radius).peak_nm
                 score_str = f"{s.uniformity_score / ref_nm * 100:.4f}" if ref_nm else "—"
             else:
                 score_str = "—"
+            tag = (_pv_tag(score_float),) if score_float is not None else ()
             if self._show_run_number:
                 rn       = s.run.run_number or "—"
                 ref      = Path(s.run.design_file).stem if s.run.design_file else "—"
                 analysed = " *" if s.has_scale_data else ""
-                self._tree.insert("", tk.END, iid=str(s.run.id), values=(
+                self._tree.insert("", tk.END, iid=str(s.run.id), tags=tag, values=(
                     s.run.date or "?", rn, s.run.design,
                     ref + analysed, radii_str, score_str,
                 ))
             else:
                 f_str = f"{s.run.f_factor:.3f}" if s.run.f_factor else "—"
-                self._tree.insert("", tk.END, iid=str(s.run.id), values=(
+                self._tree.insert("", tk.END, iid=str(s.run.id), tags=tag, values=(
                     s.run.date or "?", s.run.design, f_str, radii_str, score_str,
                 ))
 
@@ -340,7 +362,11 @@ class _UniformityPanel(ttk.Frame):
             ax.set_ylabel("Normalized thickness", fontsize=7)
             ax.tick_params(labelsize=7)
             ax.grid(True, linewidth=0.4, alpha=0.5)
-            ax.legend(fontsize=7, loc="best")
+            leg = ax.legend(fontsize=7, loc="best")
+            pvs = [pv1] + ([pv2] if len(scales2) == len(scales1) else [])
+            for txt, pv in zip(leg.get_texts(), pvs):
+                txt.set_color(_PV_TEXT_COLOR[_pv_tag(pv)])
+                txt.set_fontweight("bold")
 
         self._canvas.draw()
 
@@ -687,7 +713,11 @@ class _AddRunDialog(tk.Toplevel):
         ax.set_ylabel("Normalized thickness", fontsize=8)
         ax.tick_params(labelsize=7)
         ax.grid(True, linewidth=0.4, alpha=0.5)
-        ax.legend(fontsize=8)
+        leg = ax.legend(fontsize=8)
+        pvs = [pv1] + ([pv2] if len(scales2) == len(scales1) else [])
+        for txt, pv in zip(leg.get_texts(), pvs):
+            txt.set_color(_PV_TEXT_COLOR[_pv_tag(pv)])
+            txt.set_fontweight("bold")
         self._chart_canvas.draw()
 
     # ── Save ───────────────────────────────────────────────────────────────
